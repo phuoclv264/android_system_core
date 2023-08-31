@@ -768,8 +768,10 @@ static void LoadPropertiesFromSecondStageRes(std::map<std::string, std::string>*
 // So we need to apply the same rule of build/make/tools/post_process_props.py
 // on runtime.
 static void update_sys_usb_config() {
-    // bool is_eng = !android::base::GetBoolProperty("ro.adb.secure", true);
-    bool is_eng = true;
+    InitPropertySet("ro.adb.secure", "0");
+    InitPropertySet("ro.secure", "0");
+    InitPropertySet("ro.debuggable", "0");
+    bool is_eng = !android::base::GetBoolProperty("ro.adb.secure", true);
     std::string config = android::base::GetProperty("persist.sys.usb.config", "");
     // b/150130503, add (config == "none") condition here to prevent appending
     // ",adb" if "none" is explicitly defined in default prop.
