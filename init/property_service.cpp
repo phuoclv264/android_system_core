@@ -768,25 +768,17 @@ static void LoadPropertiesFromSecondStageRes(std::map<std::string, std::string>*
 // So we need to apply the same rule of build/make/tools/post_process_props.py
 // on runtime.
 static void update_sys_usb_config() {
-    // bool is_eng = !android::base::GetBoolProperty("ro.adb.secure", true);
-    // std::string config = android::base::GetProperty("persist.sys.usb.config", "");
-    // // b/150130503, add (config == "none") condition here to prevent appending
-    // // ",adb" if "none" is explicitly defined in default prop.
-    // if (config.empty() || config == "none") {
-    //     InitPropertySet("persist.sys.usb.config", is_eng ? "adb" : "none");
-    // } else if (is_eng && config.find("adb") == std::string::npos &&
-    //            config.length() + 4 < PROP_VALUE_MAX) {
-    //     config.append(",adb");
-    //     InitPropertySet("persist.sys.usb.config", config);
-    // }
-
-    InitPropertySet("persist.sys.usb.config", "adb");
-    InitPropertySet("ro.adb.secure", "0");
-    InitPropertySet("ro.secure", "0");
-    InitPropertySet("ro.debuggable", "0");
-    InitPropertySet("ro.config.media_vol_default", "0");
-	InitPropertySet("ro.config.vc_call_vol_default", "0");
-	InitPropertySet("ro.config.alarm_vol_default", "0");
+    bool is_eng = !android::base::GetBoolProperty("ro.adb.secure", true);
+    std::string config = android::base::GetProperty("persist.sys.usb.config", "");
+    // b/150130503, add (config == "none") condition here to prevent appending
+    // ",adb" if "none" is explicitly defined in default prop.
+    if (config.empty() || config == "none") {
+        InitPropertySet("persist.sys.usb.config", is_eng ? "adb" : "none");
+    } else if (is_eng && config.find("adb") == std::string::npos &&
+               config.length() + 4 < PROP_VALUE_MAX) {
+        config.append(",adb");
+        InitPropertySet("persist.sys.usb.config", config);
+    }
 }
 
 static void load_override_properties() {
