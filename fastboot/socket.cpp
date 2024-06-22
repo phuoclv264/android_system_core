@@ -54,9 +54,7 @@ ssize_t Socket::ReceiveAll(void* data, size_t length, int timeout_ms) {
     while (total < length) {
         ssize_t bytes = Receive(reinterpret_cast<char*>(data) + total, length - total, timeout_ms);
 
-        // Returns 0 only when the peer has disconnected because our requested length is not 0. So
-        // we return immediately to avoid dead loop here.
-        if (bytes <= 0) {
+        if (bytes == -1) {
             if (total == 0) {
                 return -1;
             }

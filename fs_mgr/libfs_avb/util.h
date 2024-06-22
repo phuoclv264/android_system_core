@@ -18,18 +18,12 @@
 
 #include <chrono>
 #include <string>
-#include <vector>
 
 #ifdef HOST_TEST
 #include <base/logging.h>
 #else
 #include <android-base/logging.h>
 #endif
-
-#include <android-base/result.h>
-
-using android::base::ErrnoError;
-using android::base::Result;
 
 #define FS_AVB_TAG "[libfs_avb]"
 
@@ -65,9 +59,6 @@ bool WaitForFile(const std::string& filename, const std::chrono::milliseconds re
 bool IsDeviceUnlocked();
 
 bool SetBlockDeviceReadOnly(const std::string& blockdev);
-
-// Returns a list of file under the dir, no order is guaranteed.
-Result<std::vector<std::string>> ListFiles(const std::string& dir);
 
 }  // namespace fs_mgr
 }  // namespace android

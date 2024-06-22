@@ -14,7 +14,8 @@
 // limitations under the License.
 //
 
-#pragma once
+#ifndef PROPERTY_INFO_SERIALIZER_H
+#define PROPERTY_INFO_SERIALIZER_H
 
 #include <string>
 #include <vector>
@@ -40,9 +41,11 @@ bool BuildTrie(const std::vector<PropertyInfoEntry>& property_info,
                const std::string& default_context, const std::string& default_type,
                std::string* serialized_trie, std::string* error);
 
-void ParsePropertyInfoFile(const std::string& file_contents, bool require_prefix_or_exact,
+void ParsePropertyInfoFile(const std::string& file_contents,
                            std::vector<PropertyInfoEntry>* property_infos,
                            std::vector<std::string>* errors);
 
 }  // namespace properties
 }  // namespace android
+
+#endif

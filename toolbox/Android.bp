@@ -1,27 +1,14 @@
-package {
-    default_applicable_licenses: ["system_core_toolbox_license"],
-}
-
-// Added automatically by a large-scale-change
-// See: http://go/android-license-faq
-license {
-    name: "system_core_toolbox_license",
-    visibility: [":__subpackages__"],
-    license_kinds: [
-        "SPDX-license-identifier-Apache-2.0",
-    ],
-    license_text: [
-        "NOTICE",
-    ],
-}
-
 cc_defaults {
     name: "toolbox_defaults",
+
     cflags: [
         "-Werror",
         "-Wno-unused-parameter",
         "-Wno-unused-const-variable",
         "-D_FILE_OFFSET_BITS=64",
+        "-DWITHOUT_NLS",
+        "-DWITHOUT_BZ2",
+        "-DWITHOUT_GZIP",
     ],
 }
 
@@ -36,13 +23,11 @@ genrule {
 cc_defaults {
     name: "toolbox_binary_defaults",
     defaults: ["toolbox_defaults"],
+    cpp_std: "experimental",
     srcs: [
         "toolbox.c",
         "getevent.c",
         "getprop.cpp",
-        "modprobe.cpp",
-        "setprop.cpp",
-        "start.cpp",
     ],
     generated_headers: [
         "toolbox_input_labels",
@@ -50,18 +35,11 @@ cc_defaults {
     shared_libs: [
         "libbase",
     ],
-    static_libs: [
-        "libmodprobe",
-        "libpropertyinfoparser",
-    ],
+    static_libs: ["libpropertyinfoparser"],
 
     symlinks: [
         "getevent",
         "getprop",
-        "modprobe",
-        "setprop",
-        "start",
-        "stop",
     ],
 }
 
@@ -76,4 +54,48 @@ cc_binary {
     stem: "toolbox",
     vendor: true,
     defaults: ["toolbox_binary_defaults"],
+}
+
+// We only want 'r' on userdebug and eng builds.
+cc_binary {
+    name: "r",
+    defaults: ["toolbox_defaults"],
+    srcs: ["r.c"],
+    vendor_available: true,
+}
+
+// We build BSD grep separately (but see http://b/111849261).
+cc_defaults {
+    name: "grep_common",
+    defaults: ["toolbox_defaults"],
+    srcs: [
+        "upstream-netbsd/usr.bin/grep/fastgrep.c",
+        "upstream-netbsd/usr.bin/grep/file.c",
+        "upstream-netbsd/usr.bin/grep/grep.c",
+        "upstream-netbsd/usr.bin/grep/queue.c",
+        "upstream-netbsd/usr.bin/grep/util.c",
+    ],
+    symlinks: [
+        "egrep",
+        "fgrep",
+    ],
+    sanitize: {
+        integer_overflow: false,
+    },
+}
+
+cc_binary {
+    name: "grep",
+    defaults: ["grep_common"],
+    recovery_available: true,
+}
+
+// Build vendor grep.
+// TODO: Add vendor_available to "grep" module and remove "grep_vendor" module
+//       when vendor_available is fully supported.
+cc_binary {
+    name: "grep_vendor",
+    stem: "grep",
+    vendor: true,
+    defaults: ["grep_common"],
 }

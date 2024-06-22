@@ -40,7 +40,7 @@ inline Result<std::string> ReadMessage(int socket) {
 }
 
 template <typename T>
-Result<void> SendMessage(int socket, const T& message) {
+Result<Success> SendMessage(int socket, const T& message) {
     std::string message_string;
     if (!message.SerializeToString(&message_string)) {
         return Error() << "Unable to serialize message";
@@ -55,7 +55,7 @@ Result<void> SendMessage(int socket, const T& message) {
         result != static_cast<long>(message_string.size())) {
         return ErrnoError() << "send() failed to send message contents";
     }
-    return {};
+    return Success();
 }
 
 }  // namespace init

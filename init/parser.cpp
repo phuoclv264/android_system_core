@@ -37,11 +37,11 @@ void Parser::AddSectionParser(const std::string& name, std::unique_ptr<SectionPa
 }
 
 void Parser::AddSingleLineParser(const std::string& prefix, LineCallback callback) {
-    line_callbacks_.emplace_back(prefix, std::move(callback));
+    line_callbacks_.emplace_back(prefix, callback);
 }
 
 void Parser::ParseData(const std::string& filename, std::string* data) {
-    data->push_back('\n');
+    data->push_back('\n');  // TODO: fix tokenizer
     data->push_back('\0');
 
     parse_state state;
@@ -61,7 +61,7 @@ void Parser::ParseData(const std::string& filename, std::string* data) {
         bad_section_found = false;
         if (section_parser == nullptr) return;
 
-        if (auto result = section_parser->EndSection(); !result.ok()) {
+        if (auto result = section_parser->EndSection(); !result) {
             parse_error_count_++;
             LOG(ERROR) << filename << ": " << section_start_line << ": " << result.error();
         }
@@ -92,7 +92,7 @@ void Parser::ParseData(const std::string& filename, std::string* data) {
                 if (line_callback != line_callbacks_.end()) {
                     end_section();
 
-                    if (auto result = line_callback->second(std::move(args)); !result.ok()) {
+                    if (auto result = line_callback->second(std::move(args)); !result) {
                         parse_error_count_++;
                         LOG(ERROR) << filename << ": " << state.line << ": " << result.error();
                     }
@@ -101,8 +101,8 @@ void Parser::ParseData(const std::string& filename, std::string* data) {
                     section_parser = section_parsers_[args[0]].get();
                     section_start_line = state.line;
                     if (auto result =
-                                section_parser->ParseSection(std::move(args), filename, state.line);
-                        !result.ok()) {
+                            section_parser->ParseSection(std::move(args), filename, state.line);
+                        !result) {
                         parse_error_count_++;
                         LOG(ERROR) << filename << ": " << state.line << ": " << result.error();
                         section_parser = nullptr;
@@ -110,7 +110,7 @@ void Parser::ParseData(const std::string& filename, std::string* data) {
                     }
                 } else if (section_parser) {
                     if (auto result = section_parser->ParseLineSection(std::move(args), state.line);
-                        !result.ok()) {
+                        !result) {
                         parse_error_count_++;
                         LOG(ERROR) << filename << ": " << state.line << ": " << result.error();
                     }
@@ -143,7 +143,7 @@ bool Parser::ParseConfigFile(const std::string& path) {
     LOG(INFO) << "Parsing file " << path << "...";
     android::base::Timer t;
     auto config_contents = ReadFile(path);
-    if (!config_contents.ok()) {
+    if (!config_contents) {
         LOG(INFO) << "Unable to read config file '" << path << "': " << config_contents.error();
         return false;
     }

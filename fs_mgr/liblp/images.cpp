@@ -17,7 +17,6 @@
 #include "images.h"
 
 #include <limits.h>
-#include <sys/stat.h>
 
 #include <android-base/file.h>
 
@@ -28,44 +27,11 @@
 namespace android {
 namespace fs_mgr {
 
-using android::base::borrowed_fd;
 using android::base::unique_fd;
 
 #if defined(_WIN32)
 static const int O_NOFOLLOW = 0;
 #endif
-
-static bool IsEmptySuperImage(borrowed_fd fd) {
-    struct stat s;
-    if (fstat(fd.get(), &s) < 0) {
-        PERROR << __PRETTY_FUNCTION__ << " fstat failed";
-        return false;
-    }
-    if (s.st_size < LP_METADATA_GEOMETRY_SIZE) {
-        return false;
-    }
-
-    // Rewind back to the start, read the geometry struct.
-    LpMetadataGeometry geometry = {};
-    if (SeekFile64(fd.get(), 0, SEEK_SET) < 0) {
-        PERROR << __PRETTY_FUNCTION__ << " lseek failed";
-        return false;
-    }
-    if (!android::base::ReadFully(fd, &geometry, sizeof(geometry))) {
-        PERROR << __PRETTY_FUNCTION__ << " read failed";
-        return false;
-    }
-    return geometry.magic == LP_METADATA_GEOMETRY_MAGIC;
-}
-
-bool IsEmptySuperImage(const std::string& file) {
-    unique_fd fd = GetControlFileOrOpen(file, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        PERROR << __PRETTY_FUNCTION__ << " open failed";
-        return false;
-    }
-    return IsEmptySuperImage(fd);
-}
 
 std::unique_ptr<LpMetadata> ReadFromImageFile(int fd) {
     std::unique_ptr<uint8_t[]> buffer = std::make_unique<uint8_t[]>(LP_METADATA_GEOMETRY_SIZE);
@@ -110,7 +76,7 @@ std::unique_ptr<LpMetadata> ReadFromImageFile(const std::string& image_file) {
     return ReadFromImageFile(fd);
 }
 
-bool WriteToImageFile(borrowed_fd fd, const LpMetadata& input) {
+bool WriteToImageFile(int fd, const LpMetadata& input) {
     std::string geometry = SerializeGeometry(input.geometry);
     std::string metadata = SerializeMetadata(input);
 
@@ -123,8 +89,8 @@ bool WriteToImageFile(borrowed_fd fd, const LpMetadata& input) {
     return true;
 }
 
-bool WriteToImageFile(const std::string& file, const LpMetadata& input) {
-    unique_fd fd(open(file.c_str(), O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC | O_BINARY, 0644));
+bool WriteToImageFile(const char* file, const LpMetadata& input) {
+    unique_fd fd(open(file, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644));
     if (fd < 0) {
         PERROR << __PRETTY_FUNCTION__ << " open failed: " << file;
         return false;
@@ -183,8 +149,8 @@ bool ImageBuilder::IsValid() const {
     return device_images_.size() == metadata_.block_devices.size();
 }
 
-bool ImageBuilder::Export(const std::string& file) {
-    unique_fd fd(open(file.c_str(), O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC | O_BINARY, 0644));
+bool ImageBuilder::Export(const char* file) {
+    unique_fd fd(open(file, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644));
     if (fd < 0) {
         PERROR << "open failed: " << file;
         return false;
@@ -208,7 +174,7 @@ bool ImageBuilder::ExportFiles(const std::string& output_dir) {
         std::string file_name = "super_" + name + ".img";
         std::string file_path = output_dir + "/" + file_name;
 
-        static const int kOpenFlags = O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC | O_NOFOLLOW | O_BINARY;
+        static const int kOpenFlags = O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC | O_NOFOLLOW;
         unique_fd fd(open(file_path.c_str(), kOpenFlags, 0644));
         if (fd < 0) {
             PERROR << "open failed: " << file_path;
@@ -443,7 +409,7 @@ bool ImageBuilder::CheckExtentOrdering() {
 }
 
 int ImageBuilder::OpenImageFile(const std::string& file) {
-    unique_fd source_fd = GetControlFileOrOpen(file.c_str(), O_RDONLY | O_CLOEXEC | O_BINARY);
+    android::base::unique_fd source_fd = GetControlFileOrOpen(file.c_str(), O_RDONLY | O_CLOEXEC);
     if (source_fd < 0) {
         PERROR << "open image file failed: " << file;
         return -1;
@@ -472,7 +438,7 @@ int ImageBuilder::OpenImageFile(const std::string& file) {
     return temp_fds_.back().get();
 }
 
-bool WriteToImageFile(const std::string& file, const LpMetadata& metadata, uint32_t block_size,
+bool WriteToImageFile(const char* file, const LpMetadata& metadata, uint32_t block_size,
                       const std::map<std::string, std::string>& images, bool sparsify) {
     ImageBuilder builder(metadata, block_size, images, sparsify);
     return builder.IsValid() && builder.Build() && builder.Export(file);

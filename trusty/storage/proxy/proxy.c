@@ -26,7 +26,6 @@
 
 #include <cutils/android_filesystem_config.h>
 
-#include "checkpoint_handling.h"
 #include "ipc.h"
 #include "log.h"
 #include "rpmb.h"
@@ -47,10 +46,6 @@ static enum dev_type parse_dev_type(const char* dev_type_name) {
         return MMC_RPMB;
     } else if (!strcmp(dev_type_name, "virt")) {
         return VIRT_RPMB;
-    } else if (!strcmp(dev_type_name, "sock")) {
-        return SOCK_RPMB;
-    } else if (!strcmp(dev_type_name, "ufs")) {
-        return UFS_RPMB;
     } else {
         return UNKNOWN_RPMB;
     }
@@ -104,11 +99,8 @@ static int drop_privs(void) {
         return -1;
     }
 
-    /*
-     * No access for group and other. We need execute access for user to create
-     * an accessible directory.
-     */
-    umask(S_IRWXG | S_IRWXO);
+    /* no-execute for user, no access for group and other */
+    umask(S_IXUSR | S_IRWXG | S_IRWXO);
 
     return 0;
 }
@@ -129,21 +121,6 @@ static int handle_req(struct storage_msg* msg, const void* req, size_t req_len) 
     if (msg->flags & STORAGE_MSG_FLAG_PRE_COMMIT) {
         rc = storage_sync_checkpoint();
         if (rc < 0) {
-            msg->result = STORAGE_ERR_GENERIC;
-            return ipc_respond(msg, NULL, 0);
-        }
-    }
-
-    if (msg->flags & STORAGE_MSG_FLAG_PRE_COMMIT_CHECKPOINT) {
-        bool is_checkpoint_active = false;
-
-        rc = is_data_checkpoint_active(&is_checkpoint_active);
-        if (rc != 0) {
-            ALOGE("is_data_checkpoint_active failed in an unexpected way. Aborting.\n");
-            msg->result = STORAGE_ERR_GENERIC;
-            return ipc_respond(msg, NULL, 0);
-        } else if (is_checkpoint_active) {
-            ALOGE("Checkpoint in progress, dropping write ...\n");
             msg->result = STORAGE_ERR_GENERIC;
             return ipc_respond(msg, NULL, 0);
         }

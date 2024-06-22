@@ -43,10 +43,8 @@
 #include <thread>
 #include <vector>
 
-#include <android-base/file.h>
 #include <android-base/parseint.h>
 #include <android-base/stringprintf.h>
-#include <android-base/strings.h>
 #include <gtest/gtest.h>
 #include <sparse/sparse.h>
 
@@ -56,7 +54,7 @@
 #include "extensions.h"
 #include "fixtures.h"
 #include "test_utils.h"
-#include "transport_sniffer.h"
+#include "usb_transport_sniffer.h"
 
 namespace fastboot {
 
@@ -229,6 +227,13 @@ TEST_F(LogicalPartitionCompliance, GetVarIsLogical) {
 
 TEST_F(LogicalPartitionCompliance, FastbootRebootTest) {
     ASSERT_TRUE(UserSpaceFastboot());
+    GTEST_LOG_(INFO) << "Rebooting to bootloader mode";
+    // Test 'fastboot reboot bootloader' from fastbootd
+    fb->RebootTo("bootloader");
+
+    // Test fastboot reboot fastboot from bootloader
+    ReconnectFastbootDevice();
+    ASSERT_FALSE(UserSpaceFastboot());
     GTEST_LOG_(INFO) << "Rebooting back to fastbootd mode";
     fb->RebootTo("fastboot");
 
@@ -263,7 +268,20 @@ TEST_F(LogicalPartitionCompliance, CreateResizeDeleteLP) {
     GTEST_LOG_(INFO) << "Flashing a logical partition..";
     EXPECT_EQ(fb->FlashPartition(test_partition_name, buf), SUCCESS)
             << "flash logical -partition failed";
+    GTEST_LOG_(INFO) << "Rebooting to bootloader mode";
+    // Reboot to bootloader mode and attempt to flash the logical partitions
+    fb->RebootTo("bootloader");
 
+    ReconnectFastbootDevice();
+    ASSERT_FALSE(UserSpaceFastboot());
+    GTEST_LOG_(INFO) << "Attempt to flash a logical partition..";
+    EXPECT_EQ(fb->FlashPartition(test_partition_name, buf), DEVICE_FAIL)
+            << "flash logical partition must fail in bootloader";
+    GTEST_LOG_(INFO) << "Rebooting back to fastbootd mode";
+    fb->RebootTo("fastboot");
+
+    ReconnectFastbootDevice();
+    ASSERT_TRUE(UserSpaceFastboot());
     GTEST_LOG_(INFO) << "Testing 'fastboot delete-logical-partition' command";
     EXPECT_EQ(fb->DeletePartition(test_partition_name), SUCCESS)
             << "delete logical-partition failed";
@@ -351,35 +369,22 @@ TEST_F(Conformance, GetVarBattVoltageOk) {
     EXPECT_TRUE(var == "yes" || var == "no") << "getvar:battery-soc-ok must be 'yes' or 'no'";
 }
 
-void AssertHexUint32(const std::string& name, const std::string& var) {
-    ASSERT_NE(var, "") << "getvar:" << name << " responded with empty string";
-    // This must start with 0x
-    ASSERT_FALSE(isspace(var.front()))
-            << "getvar:" << name << " responded with a string with leading whitespace";
-    ASSERT_FALSE(var.compare(0, 2, "0x"))
-            << "getvar:" << name << " responded with a string that does not start with 0x...";
-    int64_t size = strtoll(var.c_str(), nullptr, 16);
-    ASSERT_GT(size, 0) << "'" + var + "' is not a valid response from getvar:" << name;
-    // At most 32-bits
-    ASSERT_LE(size, std::numeric_limits<uint32_t>::max())
-            << "getvar:" << name << " must fit in a uint32_t";
-    ASSERT_LE(var.size(), FB_RESPONSE_SZ - 4)
-            << "getvar:" << name << " responded with too large of string: " + var;
-}
-
 TEST_F(Conformance, GetVarDownloadSize) {
     std::string var;
     EXPECT_EQ(fb->GetVar("max-download-size", &var), SUCCESS) << "getvar:max-download-size failed";
-    AssertHexUint32("max-download-size", var);
-}
-
-// If fetch is supported, getvar:max-fetch-size must return a hex string.
-TEST_F(Conformance, GetVarFetchSize) {
-    std::string var;
-    if (SUCCESS != fb->GetVar("max-fetch-size", &var)) {
-        GTEST_SKIP() << "getvar:max-fetch-size failed";
-    }
-    AssertHexUint32("max-fetch-size", var);
+    EXPECT_NE(var, "") << "getvar:max-download-size responded with empty string";
+    // This must start with 0x
+    EXPECT_FALSE(isspace(var.front()))
+            << "getvar:max-download-size responded with a string with leading whitespace";
+    EXPECT_FALSE(var.compare(0, 2, "0x"))
+            << "getvar:max-download-size responded with a string that does not start with 0x...";
+    int64_t size = strtoll(var.c_str(), nullptr, 16);
+    EXPECT_GT(size, 0) << "'" + var + "' is not a valid response from getvar:max-download-size";
+    // At most 32-bits
+    EXPECT_LE(size, std::numeric_limits<uint32_t>::max())
+            << "getvar:max-download-size must fit in a uint32_t";
+    EXPECT_LE(var.size(), FB_RESPONSE_SZ - 4)
+            << "getvar:max-download-size responded with too large of string: " + var;
 }
 
 TEST_F(Conformance, GetVarAll) {
@@ -671,33 +676,6 @@ TEST_F(UnlockPermissions, DownloadFlash) {
     EXPECT_EQ(fb->Partitions(&parts), SUCCESS) << "getvar:all failed in unlocked mode";
 }
 
-// If the implementation supports getvar:max-fetch-size, it must also support fetch:vendor_boot*.
-TEST_F(UnlockPermissions, FetchVendorBoot) {
-    std::string var;
-    uint64_t fetch_size;
-    if (fb->GetVar("max-fetch-size", &var) != SUCCESS) {
-        GTEST_SKIP() << "This test is skipped because fetch is not supported.";
-    }
-    ASSERT_FALSE(var.empty());
-    ASSERT_TRUE(android::base::ParseUint(var, &fetch_size)) << var << " is not an integer";
-    std::vector<std::tuple<std::string, uint64_t>> parts;
-    EXPECT_EQ(fb->Partitions(&parts), SUCCESS) << "getvar:all failed";
-    for (const auto& [partition, partition_size] : parts) {
-        if (!android::base::StartsWith(partition, "vendor_boot")) continue;
-        TemporaryFile fetched;
-
-        uint64_t offset = 0;
-        while (offset < partition_size) {
-            uint64_t chunk_size = std::min(fetch_size, partition_size - offset);
-            auto ret = fb->FetchToFd(partition, fetched.fd, offset, chunk_size);
-            ASSERT_EQ(fastboot::RetCode::SUCCESS, ret)
-                    << "Unable to fetch " << partition << " (offset=" << offset
-                    << ", size=" << chunk_size << ")";
-            offset += chunk_size;
-        }
-    }
-}
-
 TEST_F(LockPermissions, DownloadFlash) {
     std::vector<char> buf{'a', 'o', 's', 'p'};
     EXPECT_EQ(fb->Download(buf), SUCCESS) << "Download failed in locked mode";
@@ -757,16 +735,6 @@ TEST_F(LockPermissions, Boot) {
     ASSERT_EQ(fb->Boot(&resp), DEVICE_FAIL)
             << "The device did not respond with failure for 'boot' when locked";
     EXPECT_GT(resp.size(), 0) << "No error message was returned by device after FAIL";
-}
-
-TEST_F(LockPermissions, FetchVendorBoot) {
-    std::vector<std::tuple<std::string, uint64_t>> parts;
-    EXPECT_EQ(fb->Partitions(&parts), SUCCESS) << "getvar:all failed";
-    for (const auto& [partition, _] : parts) {
-        TemporaryFile fetched;
-        ASSERT_EQ(fb->FetchToFd(partition, fetched.fd, 0, 0), DEVICE_FAIL)
-                << "fetch:" << partition << ":0:0 did not fail in locked mode";
-    }
 }
 
 TEST_F(Fuzz, DownloadSize) {
@@ -1338,7 +1306,7 @@ TEST_P(UserdataPartition, UnlockErases) {
     ASSERT_TRUE(PartitionHash(fb.get(), "userdata", &hash_buf, &retcode, &err_msg)) << err_msg;
     ASSERT_EQ(retcode, 0) << err_msg;
 
-    // Validity check of hash
+    // Sanity check of hash
     EXPECT_NE(hash_before, hash_buf)
             << "Writing a random buffer to 'userdata' had the same hash as after erasing it";
     SetLockState(true);  // Lock the device
@@ -1788,19 +1756,16 @@ int main(int argc, char** argv) {
     }
 
     setbuf(stdout, NULL);  // no buffering
-
-    if (!fastboot::FastBootTest::IsFastbootOverTcp()) {
-        printf("<Waiting for Device>\n");
-        const auto matcher = [](usb_ifc_info* info) -> int {
-            return fastboot::FastBootTest::MatchFastboot(info, fastboot::FastBootTest::device_serial);
-        };
-        Transport* transport = nullptr;
-        while (!transport) {
-            transport = usb_open(matcher);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        transport->Close();
+    printf("<Waiting for Device>\n");
+    const auto matcher = [](usb_ifc_info* info) -> int {
+        return fastboot::FastBootTest::MatchFastboot(info, fastboot::FastBootTest::device_serial);
+    };
+    Transport* transport = nullptr;
+    while (!transport) {
+        transport = usb_open(matcher);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    transport->Close();
 
     if (args.find("serial_port") != args.end()) {
         fastboot::FastBootTest::serial_port = fastboot::ConfigureSerial(args.at("serial_port"));

@@ -38,6 +38,7 @@
 #include <libdm/dm.h>
 
 #include "epoll.h"
+#include "property_service.h"
 
 namespace android {
 namespace init {
@@ -95,7 +96,7 @@ void SetMountProperty(const MountHandlerEntry& entry, bool add) {
     // handling, except for clearing non-existent or already clear property.
     // Goal is reduction of empty properties and associated triggers.
     if (value.empty() && android::base::GetProperty(mount_prop, "").empty()) return;
-    android::base::SetProperty(mount_prop, value);
+    property_set(mount_prop, value);
 }
 
 }  // namespace
@@ -116,11 +117,11 @@ MountHandler::MountHandler(Epoll* epoll) : epoll_(epoll), fp_(fopen("/proc/mount
     if (!fp_) PLOG(FATAL) << "Could not open /proc/mounts";
     auto result = epoll->RegisterHandler(
             fileno(fp_.get()), [this]() { this->MountHandlerFunction(); }, EPOLLERR | EPOLLPRI);
-    if (!result.ok()) LOG(FATAL) << result.error();
+    if (!result) LOG(FATAL) << result.error();
 }
 
 MountHandler::~MountHandler() {
-    if (fp_) epoll_->UnregisterHandler(fileno(fp_.get()));
+    if (fp_) epoll_->UnregisterHandler(fileno(fp_.get())).IgnoreError();
 }
 
 void MountHandler::MountHandlerFunction() {
@@ -130,11 +131,7 @@ void MountHandler::MountHandlerFunction() {
     char* buf = nullptr;
     size_t len = 0;
     while (getline(&buf, &len, fp_.get()) != -1) {
-        auto buf_string = std::string(buf);
-        if (buf_string.find("/emulated") != std::string::npos) {
-            continue;
-        }
-        auto entry = ParseMount(buf_string);
+        auto entry = ParseMount(std::string(buf));
         auto match = untouched.find(entry);
         if (match == untouched.end()) {
             touched.emplace_back(std::move(entry));
@@ -143,11 +140,11 @@ void MountHandler::MountHandlerFunction() {
         }
     }
     free(buf);
-    for (auto& entry : untouched) {
+    for (auto entry : untouched) {
         SetMountProperty(entry, false);
         mounts_.erase(entry);
     }
-    for (auto& entry : touched) {
+    for (auto entry : touched) {
         SetMountProperty(entry, true);
         mounts_.emplace(std::move(entry));
     }

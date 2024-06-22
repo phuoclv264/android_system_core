@@ -71,7 +71,8 @@ bool uid_info::parse_uid_io_stats(std::string&& s)
         !ParseUint(fields[8],  &io[BACKGROUND].write_bytes) ||
         !ParseUint(fields[9],  &io[FOREGROUND].fsync) ||
         !ParseUint(fields[10], &io[BACKGROUND].fsync)) {
-        LOG(WARNING) << "Invalid uid I/O stats: \"" << s << "\"";
+        LOG_TO(SYSTEM, WARNING) << "Invalid uid I/O stats: \""
+                                << s << "\"";
         return false;
     }
     return true;
@@ -94,7 +95,8 @@ bool task_info::parse_task_io_stats(std::string&& s)
         !ParseUint(fields[size - 3], &io[BACKGROUND].write_bytes) ||
         !ParseUint(fields[size - 2], &io[FOREGROUND].fsync) ||
         !ParseUint(fields[size - 1], &io[BACKGROUND].fsync)) {
-        LOG(WARNING) << "Invalid task I/O stats: \"" << s << "\"";
+        LOG_TO(SYSTEM, WARNING) << "Invalid task I/O stats: \""
+                                << s << "\"";
         return false;
     }
     comm = Join(std::vector<std::string>(
@@ -121,13 +123,13 @@ void get_uid_names(const vector<int>& uids, const vector<std::string*>& uid_name
 {
     sp<IServiceManager> sm = defaultServiceManager();
     if (sm == NULL) {
-        LOG(ERROR) << "defaultServiceManager failed";
+        LOG_TO(SYSTEM, ERROR) << "defaultServiceManager failed";
         return;
     }
 
     sp<IBinder> binder = sm->getService(String16("package_native"));
     if (binder == NULL) {
-        LOG(ERROR) << "getService package_native failed";
+        LOG_TO(SYSTEM, ERROR) << "getService package_native failed";
         return;
     }
 
@@ -135,7 +137,8 @@ void get_uid_names(const vector<int>& uids, const vector<std::string*>& uid_name
     std::vector<std::string> names;
     binder::Status status = package_mgr->getNamesForUids(uids, &names);
     if (!status.isOk()) {
-        LOG(ERROR) << "package_native::getNamesForUids failed: " << status.exceptionMessage();
+        LOG_TO(SYSTEM, ERROR) << "package_native::getNamesForUids failed: "
+                              << status.exceptionMessage();
         return;
     }
 
@@ -155,7 +158,7 @@ std::unordered_map<uint32_t, uid_info> uid_monitor::get_uid_io_stats_locked()
     std::unordered_map<uint32_t, uid_info> uid_io_stats;
     std::string buffer;
     if (!ReadFileToString(UID_IO_STATS_PATH, &buffer)) {
-        PLOG(ERROR) << UID_IO_STATS_PATH << ": ReadFileToString failed";
+        PLOG_TO(SYSTEM, ERROR) << UID_IO_STATS_PATH << ": ReadFileToString failed";
         return uid_io_stats;
     }
 

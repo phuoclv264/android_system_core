@@ -1,7 +1,3 @@
-package {
-    default_applicable_licenses: ["Android-Apache-2.0"],
-}
-
 cc_library_headers {
     name: "llkd_headers",
 
@@ -50,7 +46,7 @@ cc_binary {
 
     init_rc: ["llkd.rc"],
     product_variables: {
-        eng: {
+        debuggable: {
             init_rc: ["llkd-debuggable.rc"],
 	},
     },

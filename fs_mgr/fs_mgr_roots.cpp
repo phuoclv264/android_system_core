@@ -37,7 +37,7 @@ FstabEntry* GetEntryForPath(Fstab* fstab, const std::string& path) {
     if (path.empty()) return nullptr;
     std::string str(path);
     while (true) {
-        auto entry = GetEntryForMountPoint(fstab, str);
+        auto entry = GetEntryForMountPointTryDetectFs(fstab, str);
         if (entry != nullptr) return entry;
         if (str == "/") break;
         auto slash = str.find_last_of('/');
@@ -111,8 +111,7 @@ bool EnsurePathMounted(Fstab* fstab, const std::string& path, const std::string&
         return true;
     }
 
-    static const std::vector<std::string> supported_fs{"ext4", "squashfs", "vfat", "f2fs", "erofs",
-                                                       "none"};
+    static const std::vector<std::string> supported_fs{"ext4", "squashfs", "vfat", "f2fs", "none"};
     if (std::find(supported_fs.begin(), supported_fs.end(), rec->fs_type) == supported_fs.end()) {
         LERROR << "unknown fs_type \"" << rec->fs_type << "\" for " << mount_point;
         return false;

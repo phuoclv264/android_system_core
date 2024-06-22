@@ -18,8 +18,8 @@
 #define LOG_TAG "libutils.threads"
 
 #include <assert.h>
-#include <utils/AndroidThreads.h>
 #include <utils/Thread.h>
+#include <utils/AndroidThreads.h>
 
 #if !defined(_WIN32)
 # include <sys/resource.h>
@@ -36,10 +36,7 @@
 
 #include <utils/Log.h>
 
-#if defined(__ANDROID__)
-#include <processgroup/processgroup.h>
 #include <processgroup/sched_policy.h>
-#endif
 
 #if defined(__ANDROID__)
 # define __android_unused
@@ -67,7 +64,6 @@ using namespace android;
 
 typedef void* (*android_pthread_entry)(void*);
 
-#if defined(__ANDROID__)
 struct thread_data_t {
     thread_func_t   entryFunction;
     void*           userData;
@@ -83,13 +79,10 @@ struct thread_data_t {
         char * name = t->threadName;
         delete t;
         setpriority(PRIO_PROCESS, 0, prio);
-
-        // A new thread will be in its parent's sched group by default,
-        // so we just need to handle the background case.
-        // currently set to system_background group which is different
-        // from background group for app.
         if (prio >= ANDROID_PRIORITY_BACKGROUND) {
-            SetTaskProfiles(0, {"SCHED_SP_SYSTEM"}, true);
+            set_sched_policy(0, SP_BACKGROUND);
+        } else {
+            set_sched_policy(0, SP_FOREGROUND);
         }
 
         if (name) {
@@ -99,7 +92,6 @@ struct thread_data_t {
         return f(u);
     }
 };
-#endif
 
 void androidSetThreadName(const char* name) {
 #if defined(__linux__)
@@ -308,16 +300,11 @@ int androidSetThreadPriority(pid_t tid, int pri)
 {
     int rc = 0;
     int lasterr = 0;
-    int curr_pri = getpriority(PRIO_PROCESS, tid);
-
-    if (curr_pri == pri) {
-        return rc;
-    }
 
     if (pri >= ANDROID_PRIORITY_BACKGROUND) {
-        rc = SetTaskProfiles(tid, {"SCHED_SP_SYSTEM"}, true) ? 0 : -1;
-    } else if (curr_pri >= ANDROID_PRIORITY_BACKGROUND) {
-        rc = SetTaskProfiles(tid, {"SCHED_SP_FOREGROUND"}, true) ? 0 : -1;
+        rc = set_sched_policy(tid, SP_BACKGROUND);
+    } else if (getpriority(PRIO_PROCESS, tid) >= ANDROID_PRIORITY_BACKGROUND) {
+        rc = set_sched_policy(tid, SP_FOREGROUND);
     }
 
     if (rc) {
@@ -676,7 +663,10 @@ status_t Thread::readyToRun()
 
 status_t Thread::run(const char* name, int32_t priority, size_t stack)
 {
-    LOG_ALWAYS_FATAL_IF(name == nullptr, "thread name not provided to Thread::run");
+    if (name == nullptr) {
+        ALOGW("Thread name not provided to Thread::run");
+        name = 0;
+    }
 
     Mutex::Autolock _l(mLock);
 

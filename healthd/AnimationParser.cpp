@@ -37,8 +37,8 @@ bool can_ignore_line(const char* str) {
     return true;
 }
 
-bool remove_prefix(std::string_view line, const char* prefix, const char** rest) {
-    const char* str = line.data();
+bool remove_prefix(const std::string& line, const char* prefix, const char** rest) {
+    const char* str = line.c_str();
     int start;
     char c;
 
@@ -84,6 +84,7 @@ bool parse_animation_desc(const std::string& content, animation* anim) {
     static constexpr const char* fail_prefix = "fail: ";
     static constexpr const char* clock_prefix = "clock_display: ";
     static constexpr const char* percent_prefix = "percent_display: ";
+    static constexpr const char* frame_prefix = "frame: ";
 
     std::vector<animation::frame> frames;
 

@@ -113,10 +113,6 @@ int string_to_ip(const char *string, struct sockaddr_storage *ss) {
     if (ret == 0) {
         memcpy(ss, ai->ai_addr, ai->ai_addrlen);
         freeaddrinfo(ai);
-    } else {
-        // Getaddrinfo has its own error codes. Convert to negative errno.
-        // There, the only thing that can reasonably happen is that the passed-in string is invalid.
-        ret = (ret == EAI_SYSTEM) ? -errno : -EINVAL;
     }
 
     return ret;
@@ -257,8 +253,8 @@ int ifc_set_addr(const char *name, in_addr_t addr)
  *
  * Returns zero on success and negative errno on failure.
  */
-int ifc_act_on_address(int action, const char* name, const char* address, int prefixlen,
-                       bool nodad) {
+int ifc_act_on_address(int action, const char *name, const char *address,
+                       int prefixlen) {
     int ifindex, s, len, ret;
     struct sockaddr_storage ss;
     int saved_errno;
@@ -267,13 +263,19 @@ int ifc_act_on_address(int action, const char* name, const char* address, int pr
     struct {
         struct nlmsghdr n;
         struct ifaddrmsg r;
-        // Allow for IPv4 or IPv6 address, headers, IPv4 broadcast address and padding.
-        char attrbuf[NLMSG_ALIGN(sizeof(struct rtattr)) + NLMSG_ALIGN(INET6_ADDRLEN) +
-                     NLMSG_ALIGN(sizeof(struct rtattr)) + NLMSG_ALIGN(INET_ADDRLEN)];
+        // Allow for IPv6 address, headers, IPv4 broadcast addr and padding.
+        char attrbuf[NLMSG_ALIGN(sizeof(struct nlmsghdr)) +
+                     NLMSG_ALIGN(sizeof(struct rtattr)) +
+                     NLMSG_ALIGN(INET6_ADDRLEN) +
+                     NLMSG_ALIGN(sizeof(struct rtattr)) +
+                     NLMSG_ALIGN(INET_ADDRLEN)];
     } req;
     struct rtattr *rta;
     struct nlmsghdr *nh;
     struct nlmsgerr *err;
+    char buf[NLMSG_ALIGN(sizeof(struct nlmsghdr)) +
+             NLMSG_ALIGN(sizeof(struct nlmsgerr)) +
+             NLMSG_ALIGN(sizeof(struct nlmsghdr))];
 
     // Get interface ID.
     ifindex = if_nametoindex(name);
@@ -311,7 +313,6 @@ int ifc_act_on_address(int action, const char* name, const char* address, int pr
 
     // Interface address message header.
     req.r.ifa_family = ss.ss_family;
-    req.r.ifa_flags = nodad ? IFA_F_NODAD : 0;
     req.r.ifa_prefixlen = prefixlen;
     req.r.ifa_index = ifindex;
 
@@ -343,7 +344,6 @@ int ifc_act_on_address(int action, const char* name, const char* address, int pr
         return -saved_errno;
     }
 
-    char buf[NLMSG_ALIGN(sizeof(struct nlmsgerr)) + sizeof(req)];
     len = recv(s, buf, sizeof(buf), 0);
     saved_errno = errno;
     close(s);
@@ -362,14 +362,12 @@ int ifc_act_on_address(int action, const char* name, const char* address, int pr
     return err->error;
 }
 
-// Returns zero on success and negative errno on failure.
 int ifc_add_address(const char *name, const char *address, int prefixlen) {
-    return ifc_act_on_address(RTM_NEWADDR, name, address, prefixlen, /*nodad*/ false);
+    return ifc_act_on_address(RTM_NEWADDR, name, address, prefixlen);
 }
 
-// Returns zero on success and negative errno on failure.
 int ifc_del_address(const char *name, const char * address, int prefixlen) {
-    return ifc_act_on_address(RTM_DELADDR, name, address, prefixlen, /*nodad*/ false);
+    return ifc_act_on_address(RTM_DELADDR, name, address, prefixlen);
 }
 
 /*

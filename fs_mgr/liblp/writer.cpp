@@ -17,7 +17,6 @@
 #include "writer.h"
 
 #include <inttypes.h>
-#include <string.h>
 #include <unistd.h>
 
 #include <string>
@@ -74,18 +73,17 @@ std::string SerializeMetadata(const LpMetadata& input) {
 
     // Compute header checksum.
     memset(header.header_checksum, 0, sizeof(header.header_checksum));
-    SHA256(&header, header.header_size, header.header_checksum);
+    SHA256(&header, sizeof(header), header.header_checksum);
 
     std::string header_blob =
-            std::string(reinterpret_cast<const char*>(&header), header.header_size);
+            std::string(reinterpret_cast<const char*>(&metadata.header), sizeof(metadata.header));
     return header_blob + tables;
 }
 
-// Perform checks so we don't accidentally overwrite valid metadata with
-// potentially invalid metadata, or random partition data with metadata.
-static bool ValidateAndSerializeMetadata([[maybe_unused]] const IPartitionOpener& opener,
-                                         const LpMetadata& metadata, const std::string& slot_suffix,
-                                         std::string* blob) {
+// Perform sanity checks so we don't accidentally overwrite valid metadata
+// with potentially invalid metadata, or random partition data with metadata.
+static bool ValidateAndSerializeMetadata(const IPartitionOpener& opener, const LpMetadata& metadata,
+                                         const std::string& slot_suffix, std::string* blob) {
     const LpMetadataGeometry& geometry = metadata.geometry;
 
     *blob = SerializeMetadata(metadata);
@@ -129,21 +127,16 @@ static bool ValidateAndSerializeMetadata([[maybe_unused]] const IPartitionOpener
                    << block_device.first_logical_sector << " for size " << block_device.size;
             return false;
         }
-
-        // When flashing on the device, check partition sizes. Don't do this on
-        // the host since there is no way to verify.
-#if defined(__ANDROID__)
         BlockDeviceInfo info;
         if (!opener.GetInfo(partition_name, &info)) {
             PERROR << partition_name << ": ioctl";
             return false;
         }
-        if (info.size < block_device.size) {
-            LERROR << "Block device " << partition_name << " size is too small (expected"
+        if (info.size != block_device.size) {
+            LERROR << "Block device " << partition_name << " size mismatch (expected"
                    << block_device.size << ", got " << info.size << ")";
             return false;
         }
-#endif
     }
 
     // Make sure all partition entries reference valid extents.

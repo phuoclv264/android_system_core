@@ -28,6 +28,8 @@ __BEGIN_DECLS
 struct ACgroupController;
 typedef struct ACgroupController ACgroupController;
 
+#if __ANDROID_API__ >= __ANDROID_API_Q__
+
 // ACgroupFile
 
 /**
@@ -64,18 +66,9 @@ __attribute__((warn_unused_result)) uint32_t ACgroupController_getVersion(const 
         __INTRODUCED_IN(29);
 
 /**
- * Flag bitmask used in ACgroupController_getFlags
+ * Flag bitmask to be used when ACgroupController_getFlags can be exported
  */
 #define CGROUPRC_CONTROLLER_FLAG_MOUNTED 0x1
-#define CGROUPRC_CONTROLLER_FLAG_NEEDS_ACTIVATION 0x2
-#define CGROUPRC_CONTROLLER_FLAG_OPTIONAL 0x4
-
-/**
- * Returns the flags bitmask of the given controller.
- * If the given controller is null, return 0.
- */
-__attribute__((warn_unused_result, weak)) uint32_t ACgroupController_getFlags(
-        const ACgroupController*) __INTRODUCED_IN(30);
 
 /**
  * Returns the name of the given controller.
@@ -92,3 +85,5 @@ __attribute__((warn_unused_result)) const char* ACgroupController_getPath(const 
         __INTRODUCED_IN(29);
 
 __END_DECLS
+
+#endif

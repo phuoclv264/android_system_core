@@ -22,7 +22,6 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 
-#include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -33,7 +32,6 @@
 #include <android-base/strings.h>
 #include <libavb/libavb.h>
 #include <libdm/dm.h>
-#include <libgsi/libgsi.h>
 
 #include "avb_ops.h"
 #include "avb_util.h"
@@ -226,7 +224,7 @@ AvbUniquePtr AvbHandle::LoadAndVerifyVbmeta(
             return nullptr;
     }
 
-    // Validity check here because we have to use vbmeta_images_[0] below.
+    // Sanity check here because we have to use vbmeta_images_[0] below.
     if (avb_handle->vbmeta_images_.size() < 1) {
         LERROR << "LoadAndVerifyVbmetaByPartition failed, no vbmeta loaded";
         return nullptr;
@@ -267,28 +265,14 @@ AvbUniquePtr AvbHandle::LoadAndVerifyVbmeta(
     return avb_handle;
 }
 
-static bool IsAvbPermissive() {
-    if (IsDeviceUnlocked()) {
-        // Manually putting a file under metadata partition can enforce AVB verification.
-        if (!access(DSU_METADATA_PREFIX "avb_enforce", F_OK)) {
-            LINFO << "Enforcing AVB verification when the device is unlocked";
-            return false;
-        }
-        return true;
-    }
-    return false;
-}
-
-AvbUniquePtr AvbHandle::LoadAndVerifyVbmeta(const FstabEntry& fstab_entry,
-                                            const std::vector<std::string>& preload_avb_key_blobs) {
-    // At least one of the following should be provided for public key matching.
-    if (preload_avb_key_blobs.empty() && fstab_entry.avb_keys.empty()) {
+AvbUniquePtr AvbHandle::LoadAndVerifyVbmeta(const FstabEntry& fstab_entry) {
+    if (fstab_entry.avb_keys.empty()) {
         LERROR << "avb_keys=/path/to/key(s) is missing for " << fstab_entry.mount_point;
         return nullptr;
     }
 
     // Binds allow_verification_error and rollback_protection to device unlock state.
-    bool allow_verification_error = IsAvbPermissive();
+    bool allow_verification_error = IsDeviceUnlocked();
     bool rollback_protection = !allow_verification_error;
 
     std::string public_key_data;
@@ -324,36 +308,7 @@ AvbUniquePtr AvbHandle::LoadAndVerifyVbmeta(const FstabEntry& fstab_entry,
             return nullptr;
     }
 
-    bool public_key_match = false;
-    // Performs key matching for preload_avb_key_blobs first, if it is present.
-    if (!public_key_data.empty() && !preload_avb_key_blobs.empty()) {
-        if (std::find(preload_avb_key_blobs.begin(), preload_avb_key_blobs.end(),
-                      public_key_data) != preload_avb_key_blobs.end()) {
-            public_key_match = true;
-        }
-    }
-    // Performs key matching for fstab_entry.avb_keys if necessary.
-    // Note that it is intentional to match both preload_avb_key_blobs and fstab_entry.avb_keys.
-    // Some keys might only be availble before init chroots into /system, e.g., /avb/key1
-    // in the first-stage ramdisk, while other keys might only be available after the chroot,
-    // e.g., /system/etc/avb/key2.
-    if (!public_key_data.empty() && !public_key_match) {
-        // fstab_entry.avb_keys might be either a directory containing multiple keys,
-        // or a string indicating multiple keys separated by ':'.
-        std::vector<std::string> allowed_avb_keys;
-        auto list_avb_keys_in_dir = ListFiles(fstab_entry.avb_keys);
-        if (list_avb_keys_in_dir.ok()) {
-            std::sort(list_avb_keys_in_dir->begin(), list_avb_keys_in_dir->end());
-            allowed_avb_keys = *list_avb_keys_in_dir;
-        } else {
-            allowed_avb_keys = Split(fstab_entry.avb_keys, ":");
-        }
-        if (ValidatePublicKeyBlob(public_key_data, allowed_avb_keys)) {
-            public_key_match = true;
-        }
-    }
-
-    if (!public_key_match) {
+    if (!ValidatePublicKeyBlob(public_key_data, Split(fstab_entry.avb_keys, ":"))) {
         avb_handle->status_ = AvbHandleStatus::kVerificationError;
         LWARNING << "Found unknown public key used to sign " << fstab_entry.mount_point;
         if (!allow_verification_error) {
@@ -377,15 +332,15 @@ AvbUniquePtr AvbHandle::LoadAndVerifyVbmeta() {
     return LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(),
                                {} /* expected_public_key, already checked by bootloader */,
                                HashAlgorithm::kSHA256,
-                               IsAvbPermissive(), /* allow_verification_error */
-                               true,              /* load_chained_vbmeta */
+                               IsDeviceUnlocked(), /* allow_verification_error */
+                               true,               /* load_chained_vbmeta */
                                false, /* rollback_protection, already checked by bootloader */
                                nullptr /* custom_device_path */);
 }
 
 // TODO(b/128807537): removes this function.
 AvbUniquePtr AvbHandle::Open() {
-    bool allow_verification_error = IsAvbPermissive();
+    bool is_device_unlocked = IsDeviceUnlocked();
 
     AvbUniquePtr avb_handle(new AvbHandle());
     if (!avb_handle) {
@@ -394,9 +349,8 @@ AvbUniquePtr AvbHandle::Open() {
     }
 
     FsManagerAvbOps avb_ops;
-    AvbSlotVerifyFlags flags = allow_verification_error
-                                       ? AVB_SLOT_VERIFY_FLAGS_ALLOW_VERIFICATION_ERROR
-                                       : AVB_SLOT_VERIFY_FLAGS_NONE;
+    AvbSlotVerifyFlags flags = is_device_unlocked ? AVB_SLOT_VERIFY_FLAGS_ALLOW_VERIFICATION_ERROR
+                                                  : AVB_SLOT_VERIFY_FLAGS_NONE;
     AvbSlotVerifyResult verify_result =
             avb_ops.AvbSlotVerify(fs_mgr_get_slot_suffix(), flags, &avb_handle->vbmeta_images_);
 
@@ -405,11 +359,11 @@ AvbUniquePtr AvbHandle::Open() {
     //   - AVB_SLOT_VERIFY_RESULT_ERROR_VERIFICATION (UNLOCKED only).
     //     Might occur in either the top-level vbmeta or a chained vbmeta.
     //   - AVB_SLOT_VERIFY_RESULT_ERROR_PUBLIC_KEY_REJECTED (UNLOCKED only).
-    //     Could only occur in a chained vbmeta. Because we have *no-op* operations in
+    //     Could only occur in a chained vbmeta. Because we have *dummy* operations in
     //     FsManagerAvbOps such that avb_ops->validate_vbmeta_public_key() used to validate
     //     the public key of the top-level vbmeta always pass in userspace here.
     //
-    // The following verify result won't happen, because the *no-op* operation
+    // The following verify result won't happen, because the *dummy* operation
     // avb_ops->read_rollback_index() always returns the minimum value zero. So rollbacked
     // vbmeta images, which should be caught in the bootloader stage, won't be detected here.
     //   - AVB_SLOT_VERIFY_RESULT_ERROR_ROLLBACK_INDEX
@@ -419,8 +373,9 @@ AvbUniquePtr AvbHandle::Open() {
             break;
         case AVB_SLOT_VERIFY_RESULT_ERROR_VERIFICATION:
         case AVB_SLOT_VERIFY_RESULT_ERROR_PUBLIC_KEY_REJECTED:
-            if (!allow_verification_error) {
-                LERROR << "ERROR_VERIFICATION / PUBLIC_KEY_REJECTED isn't allowed ";
+            if (!is_device_unlocked) {
+                LERROR << "ERROR_VERIFICATION / PUBLIC_KEY_REJECTED isn't allowed "
+                       << "if the device is LOCKED";
                 return nullptr;
             }
             avb_handle->status_ = AvbHandleStatus::kVerificationError;
@@ -433,16 +388,6 @@ AvbUniquePtr AvbHandle::Open() {
     // Sets the MAJOR.MINOR for init to set it into "ro.boot.avb_version".
     avb_handle->avb_version_ = StringPrintf("%d.%d", AVB_VERSION_MAJOR, AVB_VERSION_MINOR);
 
-    // Verifies vbmeta structs against the digest passed from bootloader in kernel cmdline.
-    std::unique_ptr<AvbVerifier> avb_verifier = AvbVerifier::Create();
-    if (!avb_verifier || !avb_verifier->VerifyVbmetaImages(avb_handle->vbmeta_images_)) {
-        LERROR << "Failed to verify vbmeta digest";
-        if (!allow_verification_error) {
-            LERROR << "vbmeta digest error isn't allowed ";
-            return nullptr;
-        }
-    }
-
     // Checks whether FLAGS_VERIFICATION_DISABLED is set:
     //   - Only the top-level vbmeta struct is read.
     //   - vbmeta struct in other partitions are NOT processed, including AVB HASH descriptor(s)
@@ -453,16 +398,26 @@ AvbUniquePtr AvbHandle::Open() {
     bool verification_disabled = ((AvbVBMetaImageFlags)vbmeta_header.flags &
                                   AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED);
 
-    // Checks whether FLAGS_HASHTREE_DISABLED is set.
-    //   - vbmeta struct in all partitions are still processed, just disable
-    //     dm-verity in the user space.
-    bool hashtree_disabled =
-            ((AvbVBMetaImageFlags)vbmeta_header.flags & AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED);
-
     if (verification_disabled) {
         avb_handle->status_ = AvbHandleStatus::kVerificationDisabled;
-    } else if (hashtree_disabled) {
-        avb_handle->status_ = AvbHandleStatus::kHashtreeDisabled;
+    } else {
+        // Verifies vbmeta structs against the digest passed from bootloader in kernel cmdline.
+        std::unique_ptr<AvbVerifier> avb_verifier = AvbVerifier::Create();
+        if (!avb_verifier) {
+            LERROR << "Failed to create AvbVerifier";
+            return nullptr;
+        }
+        if (!avb_verifier->VerifyVbmetaImages(avb_handle->vbmeta_images_)) {
+            LERROR << "VerifyVbmetaImages failed";
+            return nullptr;
+        }
+
+        // Checks whether FLAGS_HASHTREE_DISABLED is set.
+        bool hashtree_disabled = ((AvbVBMetaImageFlags)vbmeta_header.flags &
+                                  AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED);
+        if (hashtree_disabled) {
+            avb_handle->status_ = AvbHandleStatus::kHashtreeDisabled;
+        }
     }
 
     LINFO << "Returning avb_handle with status: " << avb_handle->status_;

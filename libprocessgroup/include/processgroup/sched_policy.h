@@ -42,7 +42,7 @@ typedef enum {
     SP_DEFAULT = -1,
     SP_BACKGROUND = 0,
     SP_FOREGROUND = 1,
-    SP_SYSTEM = 2,
+    SP_SYSTEM = 2,  // can't be used with set_sched_policy()
     SP_AUDIO_APP = 3,
     SP_AUDIO_SYS = 4,
     SP_TOP_APP = 5,
@@ -70,22 +70,11 @@ extern int set_sched_policy(int tid, SchedPolicy policy);
 extern int get_sched_policy(int tid, SchedPolicy* policy);
 
 /* Return a displayable string corresponding to policy.
- * Return value: NUL-terminated name of unspecified length, nullptr if invalid;
+ * Return value: non-NULL NUL-terminated name of unspecified length;
  * the caller is responsible for displaying the useful part of the string.
  */
 extern const char* get_sched_policy_name(SchedPolicy policy);
 
-/* Return the aggregated task profile name corresponding to cpuset policy.
- * Return value: NUL-terminated name of unspecified length, nullptr if invalid;
- * the caller could use it to call SetTaskProfiles.
- */
-extern const char* get_cpuset_policy_profile_name(SchedPolicy policy);
-
-/* Return the aggregated task profile name corresponding to sched policy.
- * Return value: NUL-terminated name of unspecified length, nullptr if invalid;
- * the caller could use it to call SetTaskProfiles.
- */
-extern const char* get_sched_policy_profile_name(SchedPolicy policy);
 #ifdef __cplusplus
 }
 #endif

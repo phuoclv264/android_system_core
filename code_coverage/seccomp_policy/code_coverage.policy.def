@@ -13,9 +13,6 @@
 // 2nd-Nth: uses mmap() to update in place
 
 close: 1
-// fchmod allowed to set libprofile-clang-extras, which wraps `open` calls, to
-// set correct permission for coverage files.
-fchmod: 1
 mkdirat: 1
 msync: 1
 munmap: 1
@@ -25,7 +22,6 @@ write: 1
 #if     defined(__LP64__)
 fcntl: 1
 fstat: 1
-ftruncate: 1
 geteuid: 1
 lseek: 1
 mmap: 1
@@ -33,7 +29,6 @@ rt_sigreturn: 1
 #else
 fcntl64: 1
 fstat64: 1
-ftruncate64: 1
 geteuid32: 1
 _llseek: 1
 mmap2: 1

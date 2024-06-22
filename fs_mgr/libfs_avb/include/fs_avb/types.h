@@ -55,12 +55,6 @@ enum class AvbHandleStatus {
 
 std::ostream& operator<<(std::ostream& os, AvbHandleStatus status);
 
-struct FsAvbHashDescriptor : AvbHashDescriptor {
-    std::string partition_name;
-    std::string salt;
-    std::string digest;
-};
-
 struct FsAvbHashtreeDescriptor : AvbHashtreeDescriptor {
     std::string partition_name;
     std::string salt;

@@ -19,7 +19,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include <optional>
 #include <string>
 
 #include <android-base/file.h>
@@ -30,60 +29,29 @@
 #include <cutils/android_reboot.h>
 
 #include "capabilities.h"
-#include "reboot_utils.h"
-#include "util.h"
 
 namespace android {
 namespace init {
 
 static std::string init_fatal_reboot_target = "bootloader";
-static bool init_fatal_panic = false;
 
-// this needs to read the /proc/* files directly because it is called before
-// ro.boot.* properties are initialized
-void SetFatalRebootTarget(const std::optional<std::string>& reboot_target) {
+void SetFatalRebootTarget() {
     std::string cmdline;
     android::base::ReadFileToString("/proc/cmdline", &cmdline);
     cmdline = android::base::Trim(cmdline);
 
-    const std::string kInitFatalPanicParamString = "androidboot.init_fatal_panic";
-    if (cmdline.find(kInitFatalPanicParamString) == std::string::npos) {
-        init_fatal_panic = false;
-        ImportBootconfig(
-                [kInitFatalPanicParamString](const std::string& key, const std::string& value) {
-                    if (key == kInitFatalPanicParamString && value == "true") {
-                        init_fatal_panic = true;
-                    }
-                });
-    } else {
-        const std::string kInitFatalPanicString = kInitFatalPanicParamString + "=true";
-        init_fatal_panic = cmdline.find(kInitFatalPanicString) != std::string::npos;
-    }
-
-    if (reboot_target) {
-        init_fatal_reboot_target = *reboot_target;
-        return;
-    }
-
-    const std::string kRebootTargetString = "androidboot.init_fatal_reboot_target";
+    const char kRebootTargetString[] = "androidboot.init_fatal_reboot_target=";
     auto start_pos = cmdline.find(kRebootTargetString);
     if (start_pos == std::string::npos) {
-        ImportBootconfig([kRebootTargetString](const std::string& key, const std::string& value) {
-            if (key == kRebootTargetString) {
-                init_fatal_reboot_target = value;
-            }
-        });
-        // We already default to bootloader if no setting is provided.
-    } else {
-        const std::string kRebootTargetStringPattern = kRebootTargetString + "=";
-        start_pos += sizeof(kRebootTargetStringPattern) - 1;
-
-        auto end_pos = cmdline.find(' ', start_pos);
-        // if end_pos isn't found, then we've run off the end, but this is okay as this is the last
-        // entry, and -1 is a valid size for string::substr();
-        auto size = end_pos == std::string::npos ? -1 : end_pos - start_pos;
-        init_fatal_reboot_target = cmdline.substr(start_pos, size);
+        return;  // We already default to bootloader if no setting is provided.
     }
+    start_pos += sizeof(kRebootTargetString) - 1;
+
+    auto end_pos = cmdline.find(' ', start_pos);
+    // if end_pos isn't found, then we've run off the end, but this is okay as this is the last
+    // entry, and -1 is a valid size for string::substr();
+    auto size = end_pos == std::string::npos ? -1 : end_pos - start_pos;
+    init_fatal_reboot_target = cmdline.substr(start_pos, size);
 }
 
 bool IsRebootCapable() {
@@ -141,7 +109,7 @@ void __attribute__((noreturn)) RebootSystem(unsigned int cmd, const std::string&
     abort();
 }
 
-void __attribute__((noreturn)) InitFatalReboot(int signal_number) {
+void __attribute__((noreturn)) InitFatalReboot() {
     auto pid = fork();
 
     if (pid == -1) {
@@ -156,7 +124,6 @@ void __attribute__((noreturn)) InitFatalReboot(int signal_number) {
     }
 
     // In the parent, let's try to get a backtrace then shutdown.
-    LOG(ERROR) << __FUNCTION__ << ": signal " << signal_number;
     std::unique_ptr<Backtrace> backtrace(
             Backtrace::Create(BACKTRACE_CURRENT_PROCESS, BACKTRACE_CURRENT_THREAD));
     if (!backtrace->Unwind(0)) {
@@ -164,12 +131,6 @@ void __attribute__((noreturn)) InitFatalReboot(int signal_number) {
     }
     for (size_t i = 0; i < backtrace->NumFrames(); i++) {
         LOG(ERROR) << backtrace->FormatFrameData(i);
-    }
-    if (init_fatal_panic) {
-        LOG(ERROR) << __FUNCTION__ << ": Trigger crash";
-        android::base::WriteStringToFile("c", PROC_SYSRQ);
-        LOG(ERROR) << __FUNCTION__ << ": Sys-Rq failed to crash the system; fallback to exit().";
-        _exit(signal_number);
     }
     RebootSystem(ANDROID_RB_RESTART2, init_fatal_reboot_target);
 }
@@ -193,7 +154,7 @@ void InstallRebootSignalHandlers() {
         // RebootSystem uses syscall() which isn't actually async-signal-safe, but our only option
         // and probably good enough given this is already an error case and only enabled for
         // development builds.
-        InitFatalReboot(signal);
+        InitFatalReboot();
     };
     action.sa_flags = SA_RESTART;
     sigaction(SIGABRT, &action, nullptr);

@@ -38,7 +38,7 @@ class Permissions {
   public:
     friend void TestPermissions(const Permissions& expected, const Permissions& test);
 
-    Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t gid, bool no_fnm_pathname);
+    Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t gid);
 
     bool Match(const std::string& path) const;
 
@@ -56,7 +56,6 @@ class Permissions {
     gid_t gid_;
     bool prefix_;
     bool wildcard_;
-    bool no_fnm_pathname_;
 };
 
 class SysfsPermissions : public Permissions {
@@ -64,8 +63,8 @@ class SysfsPermissions : public Permissions {
     friend void TestSysfsPermissions(const SysfsPermissions& expected, const SysfsPermissions& test);
 
     SysfsPermissions(const std::string& name, const std::string& attribute, mode_t perm, uid_t uid,
-                     gid_t gid, bool no_fnm_pathname)
-        : Permissions(name, perm, uid, gid, no_fnm_pathname), attribute_(attribute) {}
+                     gid_t gid)
+        : Permissions(name, perm, uid, gid), attribute_(attribute) {}
 
     bool MatchWithSubsystem(const std::string& path, const std::string& subsystem) const;
     void SetPermissions(const std::string& path) const;
@@ -85,9 +84,9 @@ class Subsystem {
     };
 
     Subsystem() {}
-    Subsystem(std::string name) : name_(std::move(name)) {}
-    Subsystem(std::string name, DevnameSource source, std::string dir_name)
-        : name_(std::move(name)), devname_source_(source), dir_name_(std::move(dir_name)) {}
+    Subsystem(const std::string& name) : name_(name) {}
+    Subsystem(const std::string& name, DevnameSource source, const std::string& dir_name)
+        : name_(name), devname_source_(source), dir_name_(dir_name) {}
 
     // Returns the full path for a uevent of a device that is a member of this subsystem,
     // according to the rules parsed from ueventd.rc
@@ -131,7 +130,6 @@ class DeviceHandler : public UeventHandler {
     void HandleDevice(const std::string& action, const std::string& devpath, bool block, int major,
                       int minor, const std::vector<std::string>& links) const;
     void FixupSysPermissions(const std::string& upath, const std::string& subsystem) const;
-    void HandleAshmemUevent(const Uevent& uevent);
 
     std::vector<Permissions> dev_permissions_;
     std::vector<SysfsPermissions> sysfs_permissions_;

@@ -45,17 +45,15 @@
 #include <vector>
 
 #include <android-base/stringprintf.h>
-#include <android-base/strings.h>
 #include <gtest/gtest.h>
 
 #include "fastboot_driver.h"
-#include "tcp.h"
 #include "usb.h"
 
 #include "extensions.h"
 #include "fixtures.h"
 #include "test_utils.h"
-#include "transport_sniffer.h"
+#include "usb_transport_sniffer.h"
 
 using namespace std::literals::chrono_literals;
 
@@ -76,13 +74,7 @@ int FastBootTest::MatchFastboot(usb_ifc_info* info, const std::string& local_ser
     return 0;
 }
 
-bool FastBootTest::IsFastbootOverTcp() {
-    return android::base::StartsWith(device_serial, "tcp:");
-}
-
 bool FastBootTest::UsbStillAvailible() {
-    if (IsFastbootOverTcp()) return true;
-
     // For some reason someone decided to prefix the path with "usb:"
     std::string prefix("usb:");
     if (std::equal(prefix.begin(), prefix.end(), device_path.begin())) {
@@ -121,19 +113,15 @@ void FastBootTest::SetUp() {
         ASSERT_TRUE(UsbStillAvailible());  // The device disconnected
     }
 
-    if (IsFastbootOverTcp()) {
-        ConnectTcpFastbootDevice();
-    } else {
-        const auto matcher = [](usb_ifc_info* info) -> int {
-            return MatchFastboot(info, device_serial);
-        };
-        for (int i = 0; i < MAX_USB_TRIES && !transport; i++) {
-            std::unique_ptr<UsbTransport> usb(usb_open(matcher, USB_TIMEOUT));
-            if (usb)
-                transport = std::unique_ptr<TransportSniffer>(
-                        new TransportSniffer(std::move(usb), serial_port));
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+    const auto matcher = [](usb_ifc_info* info) -> int {
+        return MatchFastboot(info, device_serial);
+    };
+    for (int i = 0; i < MAX_USB_TRIES && !transport; i++) {
+        std::unique_ptr<UsbTransport> usb(usb_open(matcher, USB_TIMEOUT));
+        if (usb)
+            transport = std::unique_ptr<UsbTransportSniffer>(
+                    new UsbTransportSniffer(std::move(usb), serial_port));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     ASSERT_TRUE(transport);  // no nullptr
@@ -166,8 +154,6 @@ void FastBootTest::TearDown() {
 
 // TODO, this should eventually be piped to a file instead of stdout
 void FastBootTest::TearDownSerial() {
-    if (IsFastbootOverTcp()) return;
-
     if (!transport) return;
     // One last read from serial
     transport->ProcessSerial();
@@ -181,29 +167,9 @@ void FastBootTest::TearDownSerial() {
     }
 }
 
-void FastBootTest::ConnectTcpFastbootDevice() {
-    for (int i = 0; i < MAX_TCP_TRIES && !transport; i++) {
-        std::string error;
-        std::unique_ptr<Transport> tcp(
-                tcp::Connect(device_serial.substr(4), tcp::kDefaultPort, &error).release());
-        if (tcp)
-            transport = std::unique_ptr<TransportSniffer>(new TransportSniffer(std::move(tcp), 0));
-        if (transport != nullptr) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-}
-
 void FastBootTest::ReconnectFastbootDevice() {
     fb.reset();
     transport.reset();
-
-    if (IsFastbootOverTcp()) {
-        ConnectTcpFastbootDevice();
-        device_path = cb_scratch;
-        fb = std::unique_ptr<FastBootDriver>(new FastBootDriver(transport.get(), {}, true));
-        return;
-    }
-
     while (UsbStillAvailible())
         ;
     printf("WAITING FOR DEVICE\n");
@@ -214,8 +180,8 @@ void FastBootTest::ReconnectFastbootDevice() {
     while (!transport) {
         std::unique_ptr<UsbTransport> usb(usb_open(matcher, USB_TIMEOUT));
         if (usb) {
-            transport = std::unique_ptr<TransportSniffer>(
-                    new TransportSniffer(std::move(usb), serial_port));
+            transport = std::unique_ptr<UsbTransportSniffer>(
+                    new UsbTransportSniffer(std::move(usb), serial_port));
         }
         std::this_thread::sleep_for(1s);
     }

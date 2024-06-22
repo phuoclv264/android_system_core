@@ -21,7 +21,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <fnmatch.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -35,11 +34,6 @@
 #include <log/log.h>
 #include <log/log_properties.h>
 
-#if defined(__BIONIC__)
-#define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
-#include <sys/_system_properties.h>
-#endif
-
 /**
  * Maximum size of a message that can be logged to the trace buffer.
  * Note this message includes a tag, the pid, and the string given as the name.
@@ -47,52 +41,20 @@
  */
 #define ATRACE_MESSAGE_LENGTH 1024
 
-constexpr uint32_t kSeqNoNotInit = static_cast<uint32_t>(-1);
+atomic_bool             atrace_is_ready      = ATOMIC_VAR_INIT(false);
+int                     atrace_marker_fd     = -1;
+uint64_t                atrace_enabled_tags  = ATRACE_TAG_NOT_READY;
+static bool             atrace_is_debuggable = false;
+static atomic_bool      atrace_is_enabled    = ATOMIC_VAR_INIT(true);
+static pthread_mutex_t  atrace_tags_mutex    = PTHREAD_MUTEX_INITIALIZER;
 
-atomic_bool              atrace_is_ready      = ATOMIC_VAR_INIT(false);
-int                      atrace_marker_fd     = -1;
-uint64_t                 atrace_enabled_tags  = ATRACE_TAG_NOT_READY;
-static atomic_bool       atrace_is_enabled    = ATOMIC_VAR_INIT(true);
-static pthread_mutex_t   atrace_tags_mutex    = PTHREAD_MUTEX_INITIALIZER;
-
-/**
- * Sequence number of debug.atrace.tags.enableflags the last time the enabled
- * tags were reloaded.
- **/
-static _Atomic(uint32_t) last_sequence_number = ATOMIC_VAR_INIT(kSeqNoNotInit);
-
-#if defined(__BIONIC__)
-// All zero prop_info that has a sequence number of 0. This is easier than
-// depending on implementation details of the property implementation.
-//
-// prop_info is static_assert-ed to be 96 bytes, which cannot change due to
-// ABI compatibility.
-alignas(uint64_t) static char empty_pi[96];
-static const prop_info* atrace_property_info = reinterpret_cast<const prop_info*>(empty_pi);
-#endif
-
-/**
- * This is called when the sequence number of debug.atrace.tags.enableflags
- * changes and we need to reload the enabled tags.
- **/
-static void atrace_seq_number_changed(uint32_t prev_seq_no, uint32_t seq_no);
-
-void atrace_init() {
-#if defined(__BIONIC__)
-    uint32_t seq_no = __system_property_serial(atrace_property_info);  // Acquire semantics.
-#else
-    uint32_t seq_no = 0;
-#endif
-    uint32_t prev_seq_no = atomic_load_explicit(&last_sequence_number, memory_order_relaxed);
-    if (CC_UNLIKELY(seq_no != prev_seq_no)) {
-        atrace_seq_number_changed(prev_seq_no, seq_no);
-    }
-}
-
-uint64_t atrace_get_enabled_tags()
+// Set whether this process is debuggable, which determines whether
+// application-level tracing is allowed when the ro.debuggable system property
+// is not set to '1'.
+void atrace_set_debuggable(bool debuggable)
 {
-    atrace_init();
-    return atrace_enabled_tags;
+    atrace_is_debuggable = debuggable;
+    atrace_update_tags();
 }
 
 // Check whether the given command line matches one of the comma-separated
@@ -107,7 +69,7 @@ static bool atrace_is_cmdline_match(const char* cmdline)
     for (int i = 0; i < count; i++) {
         snprintf(buf, sizeof(buf), "debug.atrace.app_%d", i);
         property_get(buf, value, "");
-        if (fnmatch(value, cmdline, FNM_NOESCAPE) == 0) {
+        if (strcmp(value, "*") == 0 || strcmp(value, cmdline) == 0) {
             return true;
         }
     }
@@ -118,21 +80,24 @@ static bool atrace_is_cmdline_match(const char* cmdline)
 // Determine whether application-level tracing is enabled for this process.
 static bool atrace_is_app_tracing_enabled()
 {
+    bool sys_debuggable = property_get_bool("ro.debuggable", 0);
     bool result = false;
 
-    // Check whether tracing is enabled for this process.
-    FILE * file = fopen("/proc/self/cmdline", "re");
-    if (file) {
-        char cmdline[4096];
-        if (fgets(cmdline, sizeof(cmdline), file)) {
-            result = atrace_is_cmdline_match(cmdline);
+    if (sys_debuggable || atrace_is_debuggable) {
+        // Check whether tracing is enabled for this process.
+        FILE * file = fopen("/proc/self/cmdline", "re");
+        if (file) {
+            char cmdline[4096];
+            if (fgets(cmdline, sizeof(cmdline), file)) {
+                result = atrace_is_cmdline_match(cmdline);
+            } else {
+                ALOGE("Error reading cmdline: %s (%d)", strerror(errno), errno);
+            }
+            fclose(file);
         } else {
-            ALOGE("Error reading cmdline: %s (%d)", strerror(errno), errno);
+            ALOGE("Error opening /proc/self/cmdline: %s (%d)", strerror(errno),
+                    errno);
         }
-        fclose(file);
-    } else {
-        ALOGE("Error opening /proc/self/cmdline: %s (%d)", strerror(errno),
-                errno);
     }
 
     return result;
@@ -171,22 +136,24 @@ static uint64_t atrace_get_property()
 void atrace_update_tags()
 {
     uint64_t tags;
-    if (atomic_load_explicit(&atrace_is_enabled, memory_order_acquire)) {
-        tags = atrace_get_property();
-        pthread_mutex_lock(&atrace_tags_mutex);
-        atrace_enabled_tags = tags;
-        pthread_mutex_unlock(&atrace_tags_mutex);
-    } else {
-        // Tracing is disabled for this process, so we simply don't
-        // initialize the tags.
-        pthread_mutex_lock(&atrace_tags_mutex);
-        atrace_enabled_tags = ATRACE_TAG_NOT_READY;
-        pthread_mutex_unlock(&atrace_tags_mutex);
+    if (CC_UNLIKELY(atomic_load_explicit(&atrace_is_ready, memory_order_acquire))) {
+        if (atomic_load_explicit(&atrace_is_enabled, memory_order_acquire)) {
+            tags = atrace_get_property();
+            pthread_mutex_lock(&atrace_tags_mutex);
+            atrace_enabled_tags = tags;
+            pthread_mutex_unlock(&atrace_tags_mutex);
+        } else {
+            // Tracing is disabled for this process, so we simply don't
+            // initialize the tags.
+            pthread_mutex_lock(&atrace_tags_mutex);
+            atrace_enabled_tags = ATRACE_TAG_NOT_READY;
+            pthread_mutex_unlock(&atrace_tags_mutex);
+        }
     }
 }
 
 #define WRITE_MSG(format_begin, format_end, name, value) { \
-    char buf[ATRACE_MESSAGE_LENGTH] __attribute__((uninitialized));     \
+    char buf[ATRACE_MESSAGE_LENGTH]; \
     int pid = getpid(); \
     int len = snprintf(buf, sizeof(buf), format_begin "%s" format_end, pid, \
         name, value); \

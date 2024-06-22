@@ -28,7 +28,7 @@ namespace {
 
 void RunTest(const std::string& data, const std::vector<std::vector<std::string>>& expected_tokens) {
     auto data_copy = std::string{data};
-    data_copy.push_back('\n');
+    data_copy.push_back('\n');  // TODO: fix tokenizer
     data_copy.push_back('\0');
 
     parse_state state;
@@ -46,7 +46,6 @@ void RunTest(const std::string& data, const std::vector<std::vector<std::string>
                 return;
             case T_NEWLINE:
                 tokens.emplace_back(std::move(current_line));
-                current_line.clear();
                 break;
             case T_TEXT:
                 current_line.emplace_back(state.text);

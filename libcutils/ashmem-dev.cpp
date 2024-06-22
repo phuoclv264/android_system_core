@@ -23,6 +23,9 @@
  */
 #define LOG_TAG "ashmem"
 
+#ifndef __ANDROID_VNDK__
+#include <dlfcn.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/ashmem.h>
@@ -39,10 +42,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <android-base/file.h>
 #include <android-base/properties.h>
-#include <android-base/strings.h>
 #include <android-base/unique_fd.h>
+
+#define ASHMEM_DEVICE "/dev/ashmem"
 
 /* Will be added to UAPI once upstream change is merged */
 #define F_SEAL_FUTURE_WRITE 0x0010
@@ -61,6 +64,32 @@ static dev_t __ashmem_rdev;
  * signal handler calls ashmem, we could get into a deadlock state.
  */
 static pthread_mutex_t __ashmem_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * We use ashmemd to enforce that apps don't open /dev/ashmem directly. Vendor
+ * code can't access system aidl services per Treble requirements. So we limit
+ * ashmemd access to the system variant of libcutils.
+ */
+#ifndef __ANDROID_VNDK__
+using openFdType = int (*)();
+
+static openFdType openFd;
+
+openFdType initOpenAshmemFd() {
+    openFdType openFd = nullptr;
+    void* handle = dlopen("libashmemd_client.so", RTLD_NOW);
+    if (!handle) {
+        ALOGE("Failed to dlopen() libashmemd_client.so: %s", dlerror());
+        return openFd;
+    }
+
+    openFd = reinterpret_cast<openFdType>(dlsym(handle, "openAshmemdFd"));
+    if (!openFd) {
+        ALOGE("Failed to dlsym() openAshmemdFd() function: %s", dlerror());
+    }
+    return openFd;
+}
+#endif
 
 /*
  * has_memfd_support() determines if the device can use memfd. memfd support
@@ -122,8 +151,7 @@ static bool check_vendor_memfd_allowed() {
         return true;
     }
 
-    // Non-numeric should be a single ASCII character. Characters after the
-    // first are ignored.
+    /* If its not a number, assume string, but check if its a sane string */
     if (tolower(vndk_version[0]) < 'a' || tolower(vndk_version[0]) > 'z') {
         ALOGE("memfd: ro.vndk.version not defined or invalid (%s), this is mandated since P.\n",
               vndk_version.c_str());
@@ -159,11 +187,9 @@ static bool __has_memfd_support() {
         return false;
     }
 
-    // Check if kernel support exists, otherwise fall back to ashmem.
-    // This code needs to build on old API levels, so we can't use the libc
-    // wrapper.
+    /* Check if kernel support exists, otherwise fall back to ashmem */
     android::base::unique_fd fd(
-            syscall(__NR_memfd_create, "test_android_memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+            syscall(__NR_memfd_create, "test_android_memfd", MFD_ALLOW_SEALING));
     if (fd == -1) {
         ALOGE("memfd_create failed: %s, no memfd support.\n", strerror(errno));
         return false;
@@ -189,43 +215,30 @@ static bool has_memfd_support() {
     return memfd_supported;
 }
 
-static std::string get_ashmem_device_path() {
-    static const std::string boot_id_path = "/proc/sys/kernel/random/boot_id";
-    std::string boot_id;
-    if (!android::base::ReadFileToString(boot_id_path, &boot_id)) {
-        ALOGE("Failed to read %s: %s.\n", boot_id_path.c_str(), strerror(errno));
-        return "";
-    };
-    boot_id = android::base::Trim(boot_id);
-
-    return "/dev/ashmem" + boot_id;
-}
-
 /* logistics of getting file descriptor for ashmem */
 static int __ashmem_open_locked()
 {
-    static const std::string ashmem_device_path = get_ashmem_device_path();
-
-    if (ashmem_device_path.empty()) {
-        return -1;
-    }
-
-    int fd = TEMP_FAILURE_RETRY(open(ashmem_device_path.c_str(), O_RDWR | O_CLOEXEC));
-
-    // fallback for APEX w/ use_vendor on Q, which would have still used /dev/ashmem
-    if (fd < 0) {
-        int saved_errno = errno;
-        fd = TEMP_FAILURE_RETRY(open("/dev/ashmem", O_RDWR | O_CLOEXEC));
-        if (fd < 0) {
-            /* Q launching devices and newer must not reach here since they should have been
-             * able to open ashmem_device_path */
-            ALOGE("Unable to open ashmem device %s (error = %s) and /dev/ashmem(error = %s)",
-                  ashmem_device_path.c_str(), strerror(saved_errno), strerror(errno));
-            return fd;
-        }
-    }
+    int ret;
     struct stat st;
-    int ret = TEMP_FAILURE_RETRY(fstat(fd, &st));
+
+    int fd = -1;
+#ifndef __ANDROID_VNDK__
+    if (!openFd) {
+        openFd = initOpenAshmemFd();
+    }
+
+    if (openFd) {
+        fd = openFd();
+    }
+#endif
+    if (fd < 0) {
+        fd = TEMP_FAILURE_RETRY(open(ASHMEM_DEVICE, O_RDWR | O_CLOEXEC));
+    }
+    if (fd < 0) {
+        return fd;
+    }
+
+    ret = TEMP_FAILURE_RETRY(fstat(fd, &st));
     if (ret < 0) {
         int save_errno = errno;
         close(fd);
@@ -335,9 +348,7 @@ int ashmem_valid(int fd)
 }
 
 static int memfd_create_region(const char* name, size_t size) {
-    // This code needs to build on old API levels, so we can't use the libc
-    // wrapper.
-    android::base::unique_fd fd(syscall(__NR_memfd_create, name, MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    android::base::unique_fd fd(syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING));
 
     if (fd == -1) {
         ALOGE("memfd_create(%s, %zd) failed: %s\n", name, size, strerror(errno));
@@ -473,4 +484,12 @@ int ashmem_get_size_region(int fd)
     }
 
     return __ashmem_check_failure(fd, TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL)));
+}
+
+void ashmem_init() {
+#ifndef __ANDROID_VNDK__
+    pthread_mutex_lock(&__ashmem_lock);
+    openFd = initOpenAshmemFd();
+    pthread_mutex_unlock(&__ashmem_lock);
+#endif  //__ANDROID_VNDK__
 }

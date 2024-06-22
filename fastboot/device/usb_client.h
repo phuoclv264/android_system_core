@@ -17,7 +17,7 @@
 
 #include <memory>
 
-#include "usb.h"
+#include <adbd/usb.h>
 
 #include "transport.h"
 
@@ -29,7 +29,6 @@ class ClientUsbTransport : public Transport {
     ssize_t Read(void* data, size_t len) override;
     ssize_t Write(const void* data, size_t len) override;
     int Close() override;
-    int Reset() override;
 
   private:
     std::unique_ptr<usb_handle> handle_;

@@ -22,7 +22,7 @@
 #include <unistd.h>
 
 #include <chrono>
-#include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -36,8 +36,12 @@
 #include <selinux/android.h>
 #include <selinux/selinux.h>
 
-#include "selabel.h"
+#include "selinux.h"
 #include "util.h"
+
+#ifdef _INIT_INIT_H
+#error "Do not include init.h in files used by ueventd; it will expose init's globals"
+#endif
 
 using namespace std::chrono_literals;
 
@@ -111,28 +115,29 @@ static bool FindVbdDevicePrefix(const std::string& path, std::string* result) {
 // the supplied buffer with the dm module's instantiated name.
 // If it doesn't start with a virtual block device, or there is some
 // error, return false.
-static bool FindDmDevice(const std::string& path, std::string* name, std::string* uuid) {
+static bool FindDmDevicePartition(const std::string& path, std::string* result) {
+    result->clear();
     if (!StartsWith(path, "/devices/virtual/block/dm-")) return false;
+    if (getpid() == 1) return false;  // first_stage_init has no sepolicy needs
 
-    if (!ReadFileToString("/sys" + path + "/dm/name", name)) {
-        return false;
+    static std::map<std::string, std::string> cache;
+    // wait_for_file will not work, the content is also delayed ...
+    for (android::base::Timer t; t.duration() < 200ms; std::this_thread::sleep_for(10ms)) {
+        if (ReadFileToString("/sys" + path + "/dm/name", result) && !result->empty()) {
+            // Got it, set cache with result, when node arrives
+            cache[path] = *result = Trim(*result);
+            return true;
+        }
     }
-    ReadFileToString("/sys" + path + "/dm/uuid", uuid);
-
-    *name = android::base::Trim(*name);
-    *uuid = android::base::Trim(*uuid);
+    auto it = cache.find(path);
+    if ((it == cache.end()) || (it->second.empty())) return false;
+    // Return cached results, when node goes away
+    *result = it->second;
     return true;
 }
 
-Permissions::Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t gid,
-                         bool no_fnm_pathname)
-    : name_(name),
-      perm_(perm),
-      uid_(uid),
-      gid_(gid),
-      prefix_(false),
-      wildcard_(false),
-      no_fnm_pathname_(no_fnm_pathname) {
+Permissions::Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t gid)
+    : name_(name), perm_(perm), uid_(uid), gid_(gid), prefix_(false), wildcard_(false) {
     // Set 'prefix_' or 'wildcard_' based on the below cases:
     //
     // 1) No '*' in 'name' -> Neither are set and Match() checks a given path for strict
@@ -143,6 +148,7 @@ Permissions::Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t 
     //
     // 3) '*' appears elsewhere -> 'wildcard_' is set to true and Match() uses fnmatch()
     //    with FNM_PATHNAME to compare 'name' to a given path.
+
     auto wildcard_position = name_.find('*');
     if (wildcard_position != std::string::npos) {
         if (wildcard_position == name_.length() - 1) {
@@ -156,8 +162,7 @@ Permissions::Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t 
 
 bool Permissions::Match(const std::string& path) const {
     if (prefix_) return StartsWith(path, name_);
-    if (wildcard_)
-        return fnmatch(name_.c_str(), path.c_str(), no_fnm_pathname_ ? 0 : FNM_PATHNAME) == 0;
+    if (wildcard_) return fnmatch(name_.c_str(), path.c_str(), FNM_PATHNAME) == 0;
     return path == name_;
 }
 
@@ -201,8 +206,7 @@ bool DeviceHandler::FindPlatformDevice(std::string path, std::string* platform_d
     while (directory != "/" && directory != ".") {
         std::string subsystem_link_path;
         if (Realpath(directory + "/subsystem", &subsystem_link_path) &&
-            (subsystem_link_path == sysfs_mount_point_ + "/bus/platform" ||
-             subsystem_link_path == sysfs_mount_point_ + "/bus/amba")) {
+            subsystem_link_path == sysfs_mount_point_ + "/bus/platform") {
             // We need to remove the mount point that we added above before returning.
             directory.erase(0, sysfs_mount_point_.size());
             *platform_device_path = directory;
@@ -325,7 +329,6 @@ std::vector<std::string> DeviceHandler::GetBlockDeviceSymlinks(const Uevent& uev
     std::string device;
     std::string type;
     std::string partition;
-    std::string uuid;
 
     if (FindPlatformDevice(uevent.path, &device)) {
         // Skip /devices/platform or /devices/ if present
@@ -343,12 +346,8 @@ std::vector<std::string> DeviceHandler::GetBlockDeviceSymlinks(const Uevent& uev
         type = "pci";
     } else if (FindVbdDevicePrefix(uevent.path, &device)) {
         type = "vbd";
-    } else if (FindDmDevice(uevent.path, &partition, &uuid)) {
-        std::vector<std::string> symlinks = {"/dev/block/mapper/" + partition};
-        if (!uuid.empty()) {
-            symlinks.emplace_back("/dev/block/mapper/by-uuid/" + uuid);
-        }
-        return symlinks;
+    } else if (FindDmDevicePartition(uevent.path, &partition)) {
+        return {"/dev/block/mapper/" + partition};
     } else {
         return {};
     }
@@ -384,41 +383,10 @@ std::vector<std::string> DeviceHandler::GetBlockDeviceSymlinks(const Uevent& uev
     return links;
 }
 
-static void RemoveDeviceMapperLinks(const std::string& devpath) {
-    std::vector<std::string> dirs = {
-            "/dev/block/mapper",
-            "/dev/block/mapper/by-uuid",
-    };
-    for (const auto& dir : dirs) {
-        if (access(dir.c_str(), F_OK) != 0) continue;
-
-        std::unique_ptr<DIR, decltype(&closedir)> dh(opendir(dir.c_str()), closedir);
-        if (!dh) {
-            PLOG(ERROR) << "Failed to open directory " << dir;
-            continue;
-        }
-
-        struct dirent* dp;
-        std::string link_path;
-        while ((dp = readdir(dh.get())) != nullptr) {
-            if (dp->d_type != DT_LNK) continue;
-
-            auto path = dir + "/" + dp->d_name;
-            if (Readlink(path, &link_path) && link_path == devpath) {
-                unlink(path.c_str());
-            }
-        }
-    }
-}
-
 void DeviceHandler::HandleDevice(const std::string& action, const std::string& devpath, bool block,
                                  int major, int minor, const std::vector<std::string>& links) const {
     if (action == "add") {
         MakeDevice(devpath, block, major, minor, links);
-    }
-
-    // We don't have full device-mapper information until a change event is fired.
-    if (action == "add" || (action == "change" && StartsWith(devpath, "/dev/block/dm-"))) {
         for (const auto& link : links) {
             if (!mkdir_recursive(Dirname(link), 0755)) {
                 PLOG(ERROR) << "Failed to create directory " << Dirname(link);
@@ -437,9 +405,6 @@ void DeviceHandler::HandleDevice(const std::string& action, const std::string& d
     }
 
     if (action == "remove") {
-        if (StartsWith(devpath, "/dev/block/dm-")) {
-            RemoveDeviceMapperLinks(devpath);
-        }
         for (const auto& link : links) {
             std::string link_path;
             if (Readlink(link, &link_path) && link_path == devpath) {
@@ -450,28 +415,10 @@ void DeviceHandler::HandleDevice(const std::string& action, const std::string& d
     }
 }
 
-void DeviceHandler::HandleAshmemUevent(const Uevent& uevent) {
-    if (uevent.device_name == "ashmem") {
-        static const std::string boot_id_path = "/proc/sys/kernel/random/boot_id";
-        std::string boot_id;
-        if (!ReadFileToString(boot_id_path, &boot_id)) {
-            PLOG(ERROR) << "Cannot duplicate ashmem device node. Failed to read " << boot_id_path;
-            return;
-        };
-        boot_id = Trim(boot_id);
-
-        Uevent dup_ashmem_uevent = uevent;
-        dup_ashmem_uevent.device_name += boot_id;
-        dup_ashmem_uevent.path += boot_id;
-        HandleUevent(dup_ashmem_uevent);
-    }
-}
-
 void DeviceHandler::HandleUevent(const Uevent& uevent) {
-  if (uevent.action == "add" || uevent.action == "change" ||
-      uevent.action == "bind" || uevent.action == "online") {
-    FixupSysPermissions(uevent.path, uevent.subsystem);
-  }
+    if (uevent.action == "add" || uevent.action == "change" || uevent.action == "online") {
+        FixupSysPermissions(uevent.path, uevent.subsystem);
+    }
 
     // if it's not a /dev device, nothing to do
     if (uevent.major < 0 || uevent.minor < 0) return;
@@ -505,8 +452,6 @@ void DeviceHandler::HandleUevent(const Uevent& uevent) {
     } else if (StartsWith(uevent.subsystem, "usb")) {
         // ignore other USB events
         return;
-    } else if (uevent.subsystem == "misc" && StartsWith(uevent.device_name, "dm-user/")) {
-        devpath = "/dev/dm-user/" + uevent.device_name.substr(8);
     } else {
         devpath = "/dev/" + Basename(uevent.path);
     }
@@ -514,10 +459,6 @@ void DeviceHandler::HandleUevent(const Uevent& uevent) {
     mkdir_recursive(Dirname(devpath), 0755);
 
     HandleDevice(uevent.action, devpath, block, uevent.major, uevent.minor, links);
-
-    // Duplicate /dev/ashmem device and name it /dev/ashmem<boot_id>.
-    // TODO(b/111903542): remove once all users of /dev/ashmem are migrated to libcutils API.
-    HandleAshmemUevent(uevent);
 }
 
 void DeviceHandler::ColdbootDone() {

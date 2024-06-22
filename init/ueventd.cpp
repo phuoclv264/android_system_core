@@ -16,7 +16,6 @@
 
 #include "ueventd.h"
 
-#include <android/api-level.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -41,7 +40,6 @@
 #include "devices.h"
 #include "firmware_handler.h"
 #include "modalias_handler.h"
-#include "selabel.h"
 #include "selinux.h"
 #include "uevent_handler.h"
 #include "uevent_listener.h"
@@ -185,7 +183,7 @@ void ColdBoot::GenerateRestoreCon(const std::string& directory) {
 
 void ColdBoot::RegenerateUevents() {
     uevent_listener_.RegenerateUevents([this](const Uevent& uevent) {
-        uevent_queue_.emplace_back(uevent);
+        uevent_queue_.emplace_back(std::move(uevent));
         return ListenerAction::kContinue;
     });
 }
@@ -263,19 +261,8 @@ void ColdBoot::Run() {
 
     WaitForSubProcesses();
 
-    android::base::SetProperty(kColdBootDoneProp, "true");
+    close(open(COLDBOOT_DONE, O_WRONLY | O_CREAT | O_CLOEXEC, 0000));
     LOG(INFO) << "Coldboot took " << cold_boot_timer.duration().count() / 1000.0f << " seconds";
-}
-
-static UeventdConfiguration GetConfiguration() {
-    // TODO: Remove these legacy paths once Android S is no longer supported.
-    if (android::base::GetIntProperty("ro.product.first_api_level", 10000) <= __ANDROID_API_S__) {
-        auto hardware = android::base::GetProperty("ro.hardware", "");
-        return ParseConfig({"/system/etc/ueventd.rc", "/vendor/ueventd.rc", "/odm/ueventd.rc",
-                            "/ueventd." + hardware + ".rc"});
-    }
-
-    return ParseConfig({"/system/etc/ueventd.rc"});
 }
 
 int ueventd_main(int argc, char** argv) {
@@ -295,23 +282,27 @@ int ueventd_main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<UeventHandler>> uevent_handlers;
 
-    auto ueventd_configuration = GetConfiguration();
+    // Keep the current product name base configuration so we remain backwards compatible and
+    // allow it to override everything.
+    // TODO: cleanup platform ueventd.rc to remove vendor specific device node entries (b/34968103)
+    auto hardware = android::base::GetProperty("ro.hardware", "");
+
+    auto ueventd_configuration = ParseConfig({"/ueventd.rc", "/vendor/ueventd.rc",
+                                              "/odm/ueventd.rc", "/ueventd." + hardware + ".rc"});
 
     uevent_handlers.emplace_back(std::make_unique<DeviceHandler>(
             std::move(ueventd_configuration.dev_permissions),
             std::move(ueventd_configuration.sysfs_permissions),
             std::move(ueventd_configuration.subsystems), android::fs_mgr::GetBootDevices(), true));
     uevent_handlers.emplace_back(std::make_unique<FirmwareHandler>(
-            std::move(ueventd_configuration.firmware_directories),
-            std::move(ueventd_configuration.external_firmware_handlers)));
+            std::move(ueventd_configuration.firmware_directories)));
 
     if (ueventd_configuration.enable_modalias_handling) {
-        std::vector<std::string> base_paths = {"/odm/lib/modules", "/vendor/lib/modules"};
-        uevent_handlers.emplace_back(std::make_unique<ModaliasHandler>(base_paths));
+        uevent_handlers.emplace_back(std::make_unique<ModaliasHandler>());
     }
     UeventListener uevent_listener(ueventd_configuration.uevent_socket_rcvbuf_size);
 
-    if (!android::base::GetBoolProperty(kColdBootDoneProp, false)) {
+    if (access(COLDBOOT_DONE, F_OK) != 0) {
         ColdBoot cold_boot(uevent_listener, uevent_handlers,
                            ueventd_configuration.enable_parallel_restorecon);
         cold_boot.Run();

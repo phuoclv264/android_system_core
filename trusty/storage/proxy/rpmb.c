@@ -16,23 +16,15 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <scsi/scsi.h>
-#include <scsi/scsi_proto.h>
-#include <scsi/sg.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include <linux/major.h>
 #include <linux/mmc/ioctl.h>
-
-#include <hardware_legacy/power.h>
 
 #include "ipc.h"
 #include "log.h"
@@ -57,269 +49,25 @@
 
 #define MMC_BLOCK_SIZE 512
 
-/*
- * Number of retry attempts when an RPMB authenticated write triggers a UNIT
- * ATTENTION
- */
-#define UFS_RPMB_WRITE_RETRY_COUNT 1
-/*
- * Number of retry attempts when an RPMB read operation triggers a UNIT
- * ATTENTION
- */
-#define UFS_RPMB_READ_RETRY_COUNT 3
-
-/*
- * There should be no timeout for security protocol ioctl call, so we choose a
- * large number for timeout.
- * 20000 millisecs == 20 seconds
- */
-#define TIMEOUT 20000
-
-/*
- * The sg device driver that supports new interface has a major version number of "3".
- * SG_GET_VERSION_NUM ioctl() will yield a number greater than or 30000.
- */
-#define RPMB_MIN_SG_VERSION_NUM 30000
-
-/*
- * CDB format of SECURITY PROTOCOL IN/OUT commands
- * (JEDEC Standard No. 220D, Page 264)
- */
-struct sec_proto_cdb {
-    /*
-     * OPERATION CODE = A2h for SECURITY PROTOCOL IN command,
-     * OPERATION CODE = B5h for SECURITY PROTOCOL OUT command.
-     */
-    uint8_t opcode;
-    /* SECURITY PROTOCOL = ECh (JEDEC Universal Flash Storage) */
-    uint8_t sec_proto;
-    /*
-     * The SECURITY PROTOCOL SPECIFIC field specifies the RPMB Protocol ID.
-     * CDB Byte 2 = 00h and CDB Byte 3 = 01h for RPMB Region 0.
-     */
-    uint8_t cdb_byte_2;
-    uint8_t cdb_byte_3;
-    /*
-     * Byte 4 and 5 are reserved.
-     */
-    uint8_t cdb_byte_4;
-    uint8_t cdb_byte_5;
-    /* ALLOCATION/TRANSFER LENGTH in big-endian */
-    uint32_t length;
-    /* Byte 9 is reserved. */
-    uint8_t cdb_byte_10;
-    /* CONTROL = 00h. */
-    uint8_t ctrl;
-} __packed;
-
 static int rpmb_fd = -1;
 static uint8_t read_buf[4096];
 static enum dev_type dev_type = UNKNOWN_RPMB;
 
-static const char* UFS_WAKE_LOCK_NAME = "ufs_seq_wakelock";
+#ifdef RPMB_DEBUG
 
-/**
- * log_buf - Log a byte buffer to the android log.
- * @priority: One of ANDROID_LOG_* priority levels from android_LogPriority in
- *            android/log.h
- * @prefix:   A null-terminated string that identifies this buffer. Must be less
- *            than 128 bytes.
- * @buf:      Buffer to dump.
- * @size:     Length of @buf in bytes.
- */
-#define LOG_BUF_SIZE 256
-static int log_buf(int priority, const char* prefix, const uint8_t* buf, size_t size) {
-    int rc;
+static void print_buf(const char* prefix, const uint8_t* buf, size_t size) {
     size_t i;
-    char line[LOG_BUF_SIZE] = {0};
-    char* cur = line;
 
-    rc = snprintf(line, LOG_BUF_SIZE, "%s @%p [%zu]", prefix, buf, size);
-    if (rc < 0 || rc >= LOG_BUF_SIZE) {
-        goto err;
-    }
-    cur += rc;
+    printf("%s @%p [%zu]", prefix, buf, size);
     for (i = 0; i < size; i++) {
-        if (i % 32 == 0) {
-            /*
-             * Flush the line out to the log after we have printed 32 bytes
-             * (also flushes the header line on the first iteration and sets up
-             * for printing the buffer itself)
-             */
-            LOG_PRI(priority, LOG_TAG, "%s", line);
-            memset(line, 0, LOG_BUF_SIZE);
-            cur = line;
-            /* Shift output over by the length of the prefix */
-            rc = snprintf(line, LOG_BUF_SIZE, "%*s", (int)strlen(prefix), "");
-            if (rc < 0 || rc >= LOG_BUF_SIZE) {
-                goto err;
-            }
-            cur += rc;
-        }
-        rc = snprintf(cur, LOG_BUF_SIZE - (cur - line), "%02x ", buf[i]);
-        if (rc < 0 || rc >= LOG_BUF_SIZE - (cur - line)) {
-            goto err;
-        }
-        cur += rc;
+        if (i && i % 32 == 0) printf("\n%*s", (int)strlen(prefix), "");
+        printf(" %02x", buf[i]);
     }
-    LOG_PRI(priority, LOG_TAG, "%s", line);
-
-    return 0;
-
-err:
-    if (rc < 0) {
-        return rc;
-    } else {
-        ALOGE("log_buf prefix was too long");
-        return -1;
-    }
+    printf("\n");
+    fflush(stdout);
 }
 
-static void set_sg_io_hdr(sg_io_hdr_t* io_hdrp, int dxfer_direction, unsigned char cmd_len,
-                          unsigned char mx_sb_len, unsigned int dxfer_len, void* dxferp,
-                          unsigned char* cmdp, void* sbp) {
-    memset(io_hdrp, 0, sizeof(sg_io_hdr_t));
-    io_hdrp->interface_id = 'S';
-    io_hdrp->dxfer_direction = dxfer_direction;
-    io_hdrp->cmd_len = cmd_len;
-    io_hdrp->mx_sb_len = mx_sb_len;
-    io_hdrp->dxfer_len = dxfer_len;
-    io_hdrp->dxferp = dxferp;
-    io_hdrp->cmdp = cmdp;
-    io_hdrp->sbp = sbp;
-    io_hdrp->timeout = TIMEOUT;
-}
-
-/**
- * enum scsi_result - Results of checking the SCSI status and sense buffer
- *
- * @SCSI_RES_OK:    SCSI status and sense are good
- * @SCSI_RES_ERR:   SCSI status or sense contain an unhandled error
- * @SCSI_RES_RETRY: SCSI sense buffer contains a status that indicates that the
- *                  command should be retried
- */
-enum scsi_result {
-    SCSI_RES_OK = 0,
-    SCSI_RES_ERR,
-    SCSI_RES_RETRY,
-};
-
-static enum scsi_result check_scsi_sense(const uint8_t* sense_buf, size_t len) {
-    uint8_t response_code = 0;
-    uint8_t sense_key = 0;
-    uint8_t additional_sense_code = 0;
-    uint8_t additional_sense_code_qualifier = 0;
-    uint8_t additional_length = 0;
-
-    if (!sense_buf || len == 0) {
-        ALOGE("Invalid SCSI sense buffer, length: %zu\n", len);
-        return SCSI_RES_ERR;
-    }
-
-    response_code = 0x7f & sense_buf[0];
-
-    if (response_code < 0x70 || response_code > 0x73) {
-        ALOGE("Invalid SCSI sense response code: %hhu\n", response_code);
-        return SCSI_RES_ERR;
-    }
-
-    if (response_code >= 0x72) {
-        /* descriptor format, SPC-6 4.4.2 */
-        if (len > 1) {
-            sense_key = 0xf & sense_buf[1];
-        }
-        if (len > 2) {
-            additional_sense_code = sense_buf[2];
-        }
-        if (len > 3) {
-            additional_sense_code_qualifier = sense_buf[3];
-        }
-        if (len > 7) {
-            additional_length = sense_buf[7];
-        }
-    } else {
-        /* fixed format, SPC-6 4.4.3 */
-        if (len > 2) {
-            sense_key = 0xf & sense_buf[2];
-        }
-        if (len > 7) {
-            additional_length = sense_buf[7];
-        }
-        if (len > 12) {
-            additional_sense_code = sense_buf[12];
-        }
-        if (len > 13) {
-            additional_sense_code_qualifier = sense_buf[13];
-        }
-    }
-
-    switch (sense_key) {
-        case NO_SENSE:
-        case 0x0f: /* COMPLETED, not present in kernel headers */
-            ALOGD("SCSI success with sense data: key=%hhu, asc=%hhu, ascq=%hhu\n", sense_key,
-                  additional_sense_code, additional_sense_code_qualifier);
-            return SCSI_RES_OK;
-        case UNIT_ATTENTION:
-            ALOGD("UNIT ATTENTION with sense data: key=%hhu, asc=%hhu, ascq=%hhu\n", sense_key,
-                  additional_sense_code, additional_sense_code_qualifier);
-            if (additional_sense_code == 0x29) {
-                /* POWER ON or RESET condition */
-                return SCSI_RES_RETRY;
-            }
-
-            /* treat this UNIT ATTENTION as an error if we don't recognize it */
-            break;
-    }
-
-    ALOGE("Unexpected SCSI sense data: key=%hhu, asc=%hhu, ascq=%hhu\n", sense_key,
-          additional_sense_code, additional_sense_code_qualifier);
-    log_buf(ANDROID_LOG_ERROR, "sense buffer: ", sense_buf, len);
-    return SCSI_RES_ERR;
-}
-
-static enum scsi_result check_sg_io_hdr(const sg_io_hdr_t* io_hdrp) {
-    if (io_hdrp->status == 0 && io_hdrp->host_status == 0 && io_hdrp->driver_status == 0) {
-        return SCSI_RES_OK;
-    }
-
-    if (io_hdrp->status & 0x01) {
-        ALOGE("SG_IO received unknown status, LSB is set: %hhu", io_hdrp->status);
-    }
-
-    if (io_hdrp->masked_status != GOOD && io_hdrp->sb_len_wr > 0) {
-        enum scsi_result scsi_res = check_scsi_sense(io_hdrp->sbp, io_hdrp->sb_len_wr);
-        if (scsi_res == SCSI_RES_RETRY) {
-            return SCSI_RES_RETRY;
-        } else if (scsi_res != SCSI_RES_OK) {
-            ALOGE("Unexpected SCSI sense. masked_status: %hhu, host_status: %hu, driver_status: "
-                  "%hu\n",
-                  io_hdrp->masked_status, io_hdrp->host_status, io_hdrp->driver_status);
-            return scsi_res;
-        }
-    }
-
-    switch (io_hdrp->masked_status) {
-        case GOOD:
-            break;
-        case CHECK_CONDITION:
-            /* handled by check_sg_sense above */
-            break;
-        default:
-            ALOGE("SG_IO failed with masked_status: %hhu, host_status: %hu, driver_status: %hu\n",
-                  io_hdrp->masked_status, io_hdrp->host_status, io_hdrp->driver_status);
-            return SCSI_RES_ERR;
-    }
-
-    if (io_hdrp->host_status != 0) {
-        ALOGE("SG_IO failed with host_status: %hu, driver_status: %hu\n", io_hdrp->host_status,
-              io_hdrp->driver_status);
-    }
-
-    if (io_hdrp->resid != 0) {
-        ALOGE("SG_IO resid was non-zero: %d\n", io_hdrp->resid);
-    }
-    return SCSI_RES_ERR;
-}
+#endif
 
 static int send_mmc_rpmb_req(int mmc_fd, const struct storage_rpmb_send_req* req) {
     struct {
@@ -339,7 +87,7 @@ static int send_mmc_rpmb_req(int mmc_fd, const struct storage_rpmb_send_req* req
         mmc_ioc_cmd_set_data((*cmd), write_buf);
 #ifdef RPMB_DEBUG
         ALOGI("opcode: 0x%x, write_flag: 0x%x\n", cmd->opcode, cmd->write_flag);
-        log_buf(ANDROID_LOG_INFO, "request: ", write_buf, req->reliable_write_size);
+        print_buf("request: ", write_buf, req->reliable_write_size);
 #endif
         write_buf += req->reliable_write_size;
         mmc.multi.num_of_cmds++;
@@ -355,7 +103,7 @@ static int send_mmc_rpmb_req(int mmc_fd, const struct storage_rpmb_send_req* req
         mmc_ioc_cmd_set_data((*cmd), write_buf);
 #ifdef RPMB_DEBUG
         ALOGI("opcode: 0x%x, write_flag: 0x%x\n", cmd->opcode, cmd->write_flag);
-        log_buf(ANDROID_LOG_INFO, "request: ", write_buf, req->write_size);
+        print_buf("request: ", write_buf, req->write_size);
 #endif
         write_buf += req->write_size;
         mmc.multi.num_of_cmds++;
@@ -379,90 +127,6 @@ static int send_mmc_rpmb_req(int mmc_fd, const struct storage_rpmb_send_req* req
     if (rc < 0) {
         ALOGE("%s: mmc ioctl failed: %d, %s\n", __func__, rc, strerror(errno));
     }
-    return rc;
-}
-
-static int send_ufs_rpmb_req(int sg_fd, const struct storage_rpmb_send_req* req) {
-    int rc;
-    int wl_rc;
-    const uint8_t* write_buf = req->payload;
-    /*
-     * Meaning of member values are stated on the definition of struct sec_proto_cdb.
-     */
-    struct sec_proto_cdb in_cdb = {0xA2, 0xEC, 0x00, 0x01, 0x00, 0x00, 0, 0x00, 0x00};
-    struct sec_proto_cdb out_cdb = {0xB5, 0xEC, 0x00, 0x01, 0x00, 0x00, 0, 0x00, 0x00};
-    unsigned char sense_buffer[32];
-
-    bool is_request_write = req->reliable_write_size > 0;
-
-    wl_rc = acquire_wake_lock(PARTIAL_WAKE_LOCK, UFS_WAKE_LOCK_NAME);
-    if (wl_rc < 0) {
-        ALOGE("%s: failed to acquire wakelock: %d, %s\n", __func__, wl_rc, strerror(errno));
-        return wl_rc;
-    }
-
-    if (req->reliable_write_size) {
-        /* Prepare SECURITY PROTOCOL OUT command. */
-        sg_io_hdr_t io_hdr;
-        int retry_count = UFS_RPMB_WRITE_RETRY_COUNT;
-        do {
-            out_cdb.length = __builtin_bswap32(req->reliable_write_size);
-            set_sg_io_hdr(&io_hdr, SG_DXFER_TO_DEV, sizeof(out_cdb), sizeof(sense_buffer),
-                          req->reliable_write_size, (void*)write_buf, (unsigned char*)&out_cdb,
-                          sense_buffer);
-            rc = ioctl(sg_fd, SG_IO, &io_hdr);
-            if (rc < 0) {
-                ALOGE("%s: ufs ioctl failed: %d, %s\n", __func__, rc, strerror(errno));
-                goto err_op;
-            }
-        } while (check_sg_io_hdr(&io_hdr) == SCSI_RES_RETRY && retry_count-- > 0);
-        write_buf += req->reliable_write_size;
-    }
-
-    if (req->write_size) {
-        /* Prepare SECURITY PROTOCOL OUT command. */
-        sg_io_hdr_t io_hdr;
-        /*
-         * We don't retry write response request messages (is_request_write ==
-         * true) because a unit attention condition between the write and
-         * requesting a response means that the device was reset and we can't
-         * get a response to our original write. We can only retry this SG_IO
-         * call when it is the first call in our sequence.
-         */
-        int retry_count = is_request_write ? 0 : UFS_RPMB_READ_RETRY_COUNT;
-        do {
-            out_cdb.length = __builtin_bswap32(req->write_size);
-            set_sg_io_hdr(&io_hdr, SG_DXFER_TO_DEV, sizeof(out_cdb), sizeof(sense_buffer),
-                          req->write_size, (void*)write_buf, (unsigned char*)&out_cdb,
-                          sense_buffer);
-            rc = ioctl(sg_fd, SG_IO, &io_hdr);
-            if (rc < 0) {
-                ALOGE("%s: ufs ioctl failed: %d, %s\n", __func__, rc, strerror(errno));
-                goto err_op;
-            }
-        } while (check_sg_io_hdr(&io_hdr) == SCSI_RES_RETRY && retry_count-- > 0);
-        write_buf += req->write_size;
-    }
-
-    if (req->read_size) {
-        /* Prepare SECURITY PROTOCOL IN command. */
-        in_cdb.length = __builtin_bswap32(req->read_size);
-        sg_io_hdr_t io_hdr;
-        set_sg_io_hdr(&io_hdr, SG_DXFER_FROM_DEV, sizeof(in_cdb), sizeof(sense_buffer),
-                      req->read_size, read_buf, (unsigned char*)&in_cdb, sense_buffer);
-        rc = ioctl(sg_fd, SG_IO, &io_hdr);
-        if (rc < 0) {
-            ALOGE("%s: ufs ioctl failed: %d, %s\n", __func__, rc, strerror(errno));
-        }
-        check_sg_io_hdr(&io_hdr);
-    }
-
-err_op:
-    wl_rc = release_wake_lock(UFS_WAKE_LOCK_NAME);
-    if (wl_rc < 0) {
-        ALOGE("%s: failed to release wakelock: %d, %s\n", __func__, wl_rc, strerror(errno));
-    }
-
     return rc;
 }
 
@@ -528,14 +192,7 @@ int rpmb_send(struct storage_msg* msg, const void* r, size_t req_len) {
             msg->result = STORAGE_ERR_GENERIC;
             goto err_response;
         }
-    } else if (dev_type == UFS_RPMB) {
-        rc = send_ufs_rpmb_req(rpmb_fd, req);
-        if (rc < 0) {
-            ALOGE("send_ufs_rpmb_req failed: %d, %s\n", rc, strerror(errno));
-            msg->result = STORAGE_ERR_GENERIC;
-            goto err_response;
-        }
-    } else if ((dev_type == VIRT_RPMB) || (dev_type == SOCK_RPMB)) {
+    } else if (dev_type == VIRT_RPMB) {
         size_t payload_size = req->reliable_write_size + req->write_size;
         rc = send_virt_rpmb_req(rpmb_fd, read_buf, req->read_size, req->payload, payload_size);
         if (rc < 0) {
@@ -556,7 +213,7 @@ int rpmb_send(struct storage_msg* msg, const void* r, size_t req_len) {
         goto err_response;
     }
 #ifdef RPMB_DEBUG
-    if (req->read_size) log_buf(ANDROID_LOG_INFO, "response: ", read_buf, req->read_size);
+    if (req->read_size) print_buf("response: ", read_buf, req->read_size);
 #endif
 
     if (msg->flags & STORAGE_MSG_FLAG_POST_COMMIT) {
@@ -574,46 +231,15 @@ err_response:
 }
 
 int rpmb_open(const char* rpmb_devname, enum dev_type open_dev_type) {
-    int rc, sg_version_num;
+    int rc;
     dev_type = open_dev_type;
 
-    if (dev_type != SOCK_RPMB) {
-        rc = open(rpmb_devname, O_RDWR, 0);
-        if (rc < 0) {
-            ALOGE("unable (%d) to open rpmb device '%s': %s\n", errno, rpmb_devname, strerror(errno));
-            return rc;
-        }
-        rpmb_fd = rc;
-
-        /* For UFS, it is prudent to check we have a sg device by calling an ioctl */
-        if (dev_type == UFS_RPMB) {
-            if ((ioctl(rpmb_fd, SG_GET_VERSION_NUM, &sg_version_num) < 0) ||
-                (sg_version_num < RPMB_MIN_SG_VERSION_NUM)) {
-                ALOGE("%s is not a sg device, or old sg driver\n", rpmb_devname);
-                return -1;
-            }
-        }
-    } else {
-        struct sockaddr_un unaddr;
-        struct sockaddr *addr = (struct sockaddr *)&unaddr;
-        rc = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (rc < 0) {
-            ALOGE("unable (%d) to create socket: %s\n", errno, strerror(errno));
-            return rc;
-        }
-        rpmb_fd = rc;
-
-        memset(&unaddr, 0, sizeof(unaddr));
-        unaddr.sun_family = AF_UNIX;
-        // TODO if it overflowed, bail rather than connecting?
-        strncpy(unaddr.sun_path, rpmb_devname, sizeof(unaddr.sun_path)-1);
-        rc = connect(rpmb_fd, addr, sizeof(unaddr));
-        if (rc < 0) {
-            ALOGE("unable (%d) to connect to rpmb socket '%s': %s\n", errno, rpmb_devname, strerror(errno));
-            return rc;
-        }
+    rc = open(rpmb_devname, O_RDWR, 0);
+    if (rc < 0) {
+        ALOGE("unable (%d) to open rpmb device '%s': %s\n", errno, rpmb_devname, strerror(errno));
+        return rc;
     }
-
+    rpmb_fd = rc;
     return 0;
 }
 

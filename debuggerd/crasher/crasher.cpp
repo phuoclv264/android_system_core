@@ -134,14 +134,10 @@ noinline int crash(int a) {
     return a*2;
 }
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wfree-nonheap-object"
-
 noinline void abuse_heap() {
     char buf[16];
     free(buf); // GCC is smart enough to warn about this, but we're doing it deliberately.
 }
-#pragma clang diagnostic pop
 
 noinline void leak() {
     while (true) {
@@ -197,7 +193,6 @@ static int usage() {
     fprintf(stderr, "  kuser_memory_barrier  call kuser_memory_barrier\n");
     fprintf(stderr, "  kuser_cmpxchg64       call kuser_cmpxchg64\n");
 #endif
-    fprintf(stderr, "  xom                   read execute-only memory\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  LOG_ALWAYS_FATAL      call liblog LOG_ALWAYS_FATAL\n");
     fprintf(stderr, "  LOG_ALWAYS_FATAL_IF   call liblog LOG_ALWAYS_FATAL_IF\n");
@@ -319,11 +314,6 @@ noinline int do_action(const char* arg) {
     } else if (!strcasecmp(arg, "seccomp")) {
       set_system_seccomp_filter();
       syscall(99999);
-#if defined(__LP64__)
-    } else if (!strcasecmp(arg, "xom")) {
-      // Try to read part of our code, which will fail if XOM is active.
-      printf("*%lx = %lx\n", reinterpret_cast<long>(usage), *reinterpret_cast<long*>(usage));
-#endif
 #if defined(__arm__)
     } else if (!strcasecmp(arg, "kuser_helper_version")) {
         return __kuser_helper_version;
@@ -353,7 +343,7 @@ noinline int do_action(const char* arg) {
 int main(int argc, char** argv) {
 #if defined(STATIC_CRASHER)
     debuggerd_callbacks_t callbacks = {
-      .get_process_info = []() {
+      .get_abort_message = []() {
         static struct {
           size_t size;
           char msg[32];
@@ -361,9 +351,7 @@ int main(int argc, char** argv) {
 
         msg.size = strlen("dummy abort message");
         memcpy(msg.msg, "dummy abort message", strlen("dummy abort message"));
-        return debugger_process_info{
-            .abort_msg = reinterpret_cast<void*>(&msg),
-        };
+        return reinterpret_cast<abort_msg_t*>(&msg);
       },
       .post_dump = nullptr
     };

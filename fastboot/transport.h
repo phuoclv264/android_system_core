@@ -36,8 +36,6 @@ class Transport {
     // Closes the underlying transport. Returns 0 on success.
     virtual int Close() = 0;
 
-    virtual int Reset() = 0;
-
     // Blocks until the transport disconnects. Transports that don't support
     // this will return immediately. Returns 0 on success.
     virtual int WaitForDisconnect() { return 0; }

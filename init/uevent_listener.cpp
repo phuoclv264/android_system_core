@@ -95,18 +95,20 @@ UeventListener::UeventListener(size_t uevent_socket_rcvbuf_size) {
     fcntl(device_fd_, F_SETFL, O_NONBLOCK);
 }
 
-ReadUeventResult UeventListener::ReadUevent(Uevent* uevent) const {
+bool UeventListener::ReadUevent(Uevent* uevent) const {
     char msg[UEVENT_MSG_LEN + 2];
     int n = uevent_kernel_multicast_recv(device_fd_, msg, UEVENT_MSG_LEN);
     if (n <= 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            PLOG(ERROR) << "Error reading from Uevent Fd";
+            LOG(ERROR) << "Error reading from Uevent Fd";
         }
-        return ReadUeventResult::kFailed;
+        return false;
     }
     if (n >= UEVENT_MSG_LEN) {
         LOG(ERROR) << "Uevent overflowed buffer, discarding";
-        return ReadUeventResult::kInvalid;
+        // Return true here even if we discard as we may have more uevents pending and we
+        // want to keep processing them.
+        return true;
     }
 
     msg[n] = '\0';
@@ -114,7 +116,7 @@ ReadUeventResult UeventListener::ReadUevent(Uevent* uevent) const {
 
     ParseEvent(msg, uevent);
 
-    return ReadUeventResult::kSuccess;
+    return true;
 }
 
 // RegenerateUevents*() walks parts of the /sys tree and pokes the uevent files to cause the kernel
@@ -129,16 +131,13 @@ ListenerAction UeventListener::RegenerateUeventsForDir(DIR* d,
                                                        const ListenerCallback& callback) const {
     int dfd = dirfd(d);
 
-    int fd = openat(dfd, "uevent", O_WRONLY | O_CLOEXEC);
+    int fd = openat(dfd, "uevent", O_WRONLY);
     if (fd >= 0) {
         write(fd, "add\n", 4);
         close(fd);
 
         Uevent uevent;
-        ReadUeventResult result;
-        while ((result = ReadUevent(&uevent)) != ReadUeventResult::kFailed) {
-            // Skip processing the uevent if it is invalid.
-            if (result == ReadUeventResult::kInvalid) continue;
+        while (ReadUevent(&uevent)) {
             if (callback(uevent) == ListenerAction::kStop) return ListenerAction::kStop;
         }
     }
@@ -147,7 +146,7 @@ ListenerAction UeventListener::RegenerateUeventsForDir(DIR* d,
     while ((de = readdir(d)) != nullptr) {
         if (de->d_type != DT_DIR || de->d_name[0] == '.') continue;
 
-        fd = openat(dfd, de->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        fd = openat(dfd, de->d_name, O_RDONLY | O_DIRECTORY);
         if (fd < 0) continue;
 
         std::unique_ptr<DIR, decltype(&closedir)> d2(fdopendir(fd), closedir);
@@ -172,7 +171,7 @@ ListenerAction UeventListener::RegenerateUeventsForPath(const std::string& path,
     return RegenerateUeventsForDir(d.get(), callback);
 }
 
-static const char* kRegenerationPaths[] = {"/sys/devices"};
+static const char* kRegenerationPaths[] = {"/sys/class", "/sys/block", "/sys/devices"};
 
 void UeventListener::RegenerateUevents(const ListenerCallback& callback) const {
     for (const auto path : kRegenerationPaths) {
@@ -213,10 +212,7 @@ void UeventListener::Poll(const ListenerCallback& callback,
             // We're non-blocking, so if we receive a poll event keep processing until
             // we have exhausted all uevent messages.
             Uevent uevent;
-            ReadUeventResult result;
-            while ((result = ReadUevent(&uevent)) != ReadUeventResult::kFailed) {
-                // Skip processing the uevent if it is invalid.
-                if (result == ReadUeventResult::kInvalid) continue;
+            while (ReadUevent(&uevent)) {
                 if (callback(uevent) == ListenerAction::kStop) return;
             }
         }

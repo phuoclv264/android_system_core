@@ -83,8 +83,7 @@ TEST(persistent_properties, EndToEnd) {
         {"persist.\x00\x01\x02\xFF\xFE\xFD\x7F\x8F\x9F", "non-ascii-name"},
     };
 
-    ASSERT_RESULT_OK(
-            WritePersistentPropertyFile(VectorToPersistentProperties(persistent_properties)));
+    ASSERT_TRUE(WritePersistentPropertyFile(VectorToPersistentProperties(persistent_properties)));
 
     auto read_back_properties = LoadPersistentProperties();
     CheckPropertiesEqual(persistent_properties, read_back_properties);
@@ -98,8 +97,7 @@ TEST(persistent_properties, AddProperty) {
     std::vector<std::pair<std::string, std::string>> persistent_properties = {
         {"persist.sys.timezone", "America/Los_Angeles"},
     };
-    ASSERT_RESULT_OK(
-            WritePersistentPropertyFile(VectorToPersistentProperties(persistent_properties)));
+    ASSERT_TRUE(WritePersistentPropertyFile(VectorToPersistentProperties(persistent_properties)));
 
     WritePersistentProperty("persist.sys.locale", "pt-BR");
 
@@ -121,8 +119,7 @@ TEST(persistent_properties, UpdateProperty) {
         {"persist.sys.locale", "en-US"},
         {"persist.sys.timezone", "America/Los_Angeles"},
     };
-    ASSERT_RESULT_OK(
-            WritePersistentPropertyFile(VectorToPersistentProperties(persistent_properties)));
+    ASSERT_TRUE(WritePersistentPropertyFile(VectorToPersistentProperties(persistent_properties)));
 
     WritePersistentProperty("persist.sys.locale", "pt-BR");
 
@@ -140,7 +137,7 @@ TEST(persistent_properties, UpdatePropertyBadParse) {
     ASSERT_TRUE(tf.fd != -1);
     persistent_property_filename = tf.path;
 
-    ASSERT_RESULT_OK(WriteFile(tf.path, "ab"));
+    ASSERT_TRUE(WriteFile(tf.path, "ab"));
 
     WritePersistentProperty("persist.sys.locale", "pt-BR");
 

@@ -42,7 +42,6 @@
 #include <android-base/file.h>
 #include <android-base/unique_fd.h>
 #include <async_safe/log.h>
-#include <bionic/reserved_signals.h>
 #include <unwindstack/DexFiles.h>
 #include <unwindstack/JitDebug.h>
 #include <unwindstack/Maps.h>
@@ -82,31 +81,29 @@ static void debuggerd_fallback_trace(int output_fd, ucontext_t* ucontext) {
     thread.pid = getpid();
     thread.tid = gettid();
     thread.thread_name = get_thread_name(gettid());
-    thread.registers.reset(
-        unwindstack::Regs::CreateFromUcontext(unwindstack::Regs::CurrentArch(), ucontext));
+    unwindstack::ArchEnum arch = unwindstack::Regs::CurrentArch();
+    thread.registers.reset(unwindstack::Regs::CreateFromUcontext(arch, ucontext));
 
     // TODO: Create this once and store it in a global?
     unwindstack::UnwinderFromPid unwinder(kMaxFrames, getpid());
-    // Do not use the thread cache here because it will call pthread_key_create
-    // which doesn't work in linker code. See b/189803009.
-    // Use a normal cached object because the process is stopped, and there
-    // is no chance of data changing between reads.
-    auto process_memory = unwindstack::Memory::CreateProcessMemoryCached(getpid());
-    unwinder.SetProcessMemory(process_memory);
-    dump_backtrace_thread(output_fd, &unwinder, thread);
+    if (unwinder.Init(arch)) {
+      dump_backtrace_thread(output_fd, &unwinder, thread);
+    } else {
+      async_safe_format_log(ANDROID_LOG_ERROR, "libc", "Unable to init unwinder.");
+    }
   }
   __linker_disable_fallback_allocator();
 }
 
-static void debuggerd_fallback_tombstone(int output_fd, int proto_fd, ucontext_t* ucontext,
-                                         siginfo_t* siginfo, void* abort_message) {
+static void debuggerd_fallback_tombstone(int output_fd, ucontext_t* ucontext, siginfo_t* siginfo,
+                                         void* abort_message) {
   if (!__linker_enable_fallback_allocator()) {
     async_safe_format_log(ANDROID_LOG_ERROR, "libc", "fallback allocator already in use");
     return;
   }
 
-  engrave_tombstone_ucontext(output_fd, proto_fd, reinterpret_cast<uintptr_t>(abort_message),
-                             siginfo, ucontext);
+  engrave_tombstone_ucontext(output_fd, reinterpret_cast<uintptr_t>(abort_message), siginfo,
+                             ucontext);
   __linker_disable_fallback_allocator();
 }
 
@@ -238,10 +235,7 @@ static void trace_handler(siginfo_t* info, ucontext_t* ucontext) {
 
   // Fetch output fd from tombstoned.
   unique_fd tombstone_socket, output_fd;
-  if (!tombstoned_connect(getpid(), &tombstone_socket, &output_fd, nullptr,
-                          kDebuggerdNativeBacktrace)) {
-    async_safe_format_log(ANDROID_LOG_ERROR, "libc",
-                          "missing crash_dump_fallback() in selinux policy?");
+  if (!tombstoned_connect(getpid(), &tombstone_socket, &output_fd, kDebuggerdNativeBacktrace)) {
     goto exit;
   }
 
@@ -278,7 +272,7 @@ static void trace_handler(siginfo_t* info, ucontext_t* ucontext) {
         siginfo.si_pid = getpid();
         siginfo.si_uid = getuid();
 
-        if (syscall(__NR_rt_tgsigqueueinfo, getpid(), tid, BIONIC_SIGNAL_DEBUGGER, &siginfo) != 0) {
+        if (syscall(__NR_rt_tgsigqueueinfo, getpid(), tid, DEBUGGER_SIGNAL, &siginfo) != 0) {
           async_safe_format_log(ANDROID_LOG_ERROR, "libc", "failed to send trace signal to %d: %s",
                                 tid, strerror(errno));
           return false;
@@ -332,10 +326,10 @@ static void crash_handler(siginfo_t* info, ucontext_t* ucontext, void* abort_mes
     _exit(1);
   }
 
-  unique_fd tombstone_socket, output_fd, proto_fd;
-  bool tombstoned_connected = tombstoned_connect(getpid(), &tombstone_socket, &output_fd, &proto_fd,
-                                                 kDebuggerdTombstoneProto);
-  debuggerd_fallback_tombstone(output_fd.get(), proto_fd.get(), ucontext, info, abort_message);
+  unique_fd tombstone_socket, output_fd;
+  bool tombstoned_connected =
+      tombstoned_connect(getpid(), &tombstone_socket, &output_fd, kDebuggerdTombstone);
+  debuggerd_fallback_tombstone(output_fd.get(), ucontext, info, abort_message);
   if (tombstoned_connected) {
     tombstoned_notify_completion(tombstone_socket.get());
   }
@@ -346,7 +340,7 @@ static void crash_handler(siginfo_t* info, ucontext_t* ucontext, void* abort_mes
 
 extern "C" void debuggerd_fallback_handler(siginfo_t* info, ucontext_t* ucontext,
                                            void* abort_message) {
-  if (info->si_signo == BIONIC_SIGNAL_DEBUGGER && info->si_value.sival_ptr != nullptr) {
+  if (info->si_signo == DEBUGGER_SIGNAL && info->si_value.sival_ptr != nullptr) {
     return trace_handler(info, ucontext);
   } else {
     return crash_handler(info, ucontext, abort_message);

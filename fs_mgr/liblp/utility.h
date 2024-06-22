@@ -21,10 +21,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#include <limits>
-#include <string>
-#include <string_view>
-
 #include <android-base/logging.h>
 #include <android-base/unique_fd.h>
 
@@ -67,45 +63,37 @@ int64_t SeekFile64(int fd, int64_t offset, int whence);
 void SHA256(const void* data, size_t length, uint8_t out[32]);
 
 // Align |base| such that it is evenly divisible by |alignment|, which does not
-// have to be a power of two. Return false on overflow.
-template <typename T>
-bool AlignTo(T base, uint32_t alignment, T* out) {
-    static_assert(std::numeric_limits<T>::is_integer);
-    static_assert(!std::numeric_limits<T>::is_signed);
+// have to be a power of two.
+constexpr uint64_t AlignTo(uint64_t base, uint32_t alignment) {
     if (!alignment) {
-        *out = base;
-        return true;
+        return base;
     }
-    T remainder = base % alignment;
+    uint64_t remainder = base % alignment;
     if (remainder == 0) {
-        *out = base;
-        return true;
+        return base;
     }
-    T to_add = alignment - remainder;
-    if (to_add > std::numeric_limits<T>::max() - base) {
-        return false;
+    return base + (alignment - remainder);
+}
+
+// Same as the above |AlignTo|, except that |base| is only aligned when added to
+// |alignment_offset|.
+constexpr uint64_t AlignTo(uint64_t base, uint32_t alignment, uint32_t alignment_offset) {
+    uint64_t aligned = AlignTo(base, alignment) + alignment_offset;
+    if (aligned - alignment >= base) {
+        // We overaligned (base < alignment_offset).
+        return aligned - alignment;
     }
-    *out = base + to_add;
-    return true;
+    return aligned;
 }
 
 // Update names from C++ strings.
 bool UpdateBlockDevicePartitionName(LpMetadataBlockDevice* device, const std::string& name);
 bool UpdatePartitionGroupName(LpMetadataPartitionGroup* group, const std::string& name);
-bool UpdatePartitionName(LpMetadataPartition* partition, const std::string& name);
 
 // Call BLKROSET ioctl on fd so that fd is readonly / read-writable.
 bool SetBlockReadonly(int fd, bool readonly);
 
-::android::base::unique_fd GetControlFileOrOpen(std::string_view path, int flags);
-
-// For Virtual A/B updates, modify |metadata| so that it can be written to |target_slot_number|.
-bool UpdateMetadataForInPlaceSnapshot(LpMetadata* metadata, uint32_t source_slot_number,
-                                      uint32_t target_slot_number);
-
-// Forcefully set metadata header version to 1.0, clearing any incompatible flags and attributes
-// so that when downgrading to a build with liblp V0, the device still boots.
-void SetMetadataHeaderV0(LpMetadata* metadata);
+::android::base::unique_fd GetControlFileOrOpen(const char* path, int flags);
 
 }  // namespace fs_mgr
 }  // namespace android

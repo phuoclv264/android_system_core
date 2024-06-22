@@ -16,17 +16,15 @@
 
 #pragma once
 
-#include <functional>
-
 #include <fstab/fstab.h>
 
-#include <set>
 #include <string>
 #include <vector>
 
 android::fs_mgr::Fstab fs_mgr_overlayfs_candidate_list(const android::fs_mgr::Fstab& fstab);
 
 bool fs_mgr_overlayfs_mount_all(android::fs_mgr::Fstab* fstab);
+std::vector<std::string> fs_mgr_overlayfs_required_devices(android::fs_mgr::Fstab* fstab);
 bool fs_mgr_overlayfs_setup(const char* backing = nullptr, const char* mount_point = nullptr,
                             bool* change = nullptr, bool force = true);
 bool fs_mgr_overlayfs_teardown(const char* mount_point = nullptr, bool* change = nullptr);
@@ -40,20 +38,3 @@ enum class OverlayfsValidResult {
     kOverrideCredsRequired,
 };
 OverlayfsValidResult fs_mgr_overlayfs_valid();
-
-namespace android {
-namespace fs_mgr {
-
-void MapScratchPartitionIfNeeded(Fstab* fstab,
-                                 const std::function<bool(const std::set<std::string>&)>& init);
-void CleanupOldScratchFiles();
-
-// Teardown overlays of all sources (cache dir, scratch device, DSU) for |mount_point|.
-// Teardown all overlays if |mount_point| is empty.
-//
-// Note: This should be called if and only if in recovery or fastbootd to teardown
-// overlays if any partition is flashed or updated.
-void TeardownAllOverlayForMountPoint(const std::string& mount_point = {});
-
-}  // namespace fs_mgr
-}  // namespace android

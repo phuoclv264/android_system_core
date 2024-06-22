@@ -106,7 +106,7 @@ static int try_interfaces(IOUSBDeviceInterface500** dev, usb_handle* handle) {
     kr = (*dev)->CreateInterfaceIterator(dev, &request, &iterator);
 
     if (kr != 0) {
-        WARN("Couldn't create a device interface iterator: (%08x)\n", kr);
+        ERR("Couldn't create a device interface iterator: (%08x)\n", kr);
         return -1;
     }
 
@@ -368,7 +368,6 @@ static int try_device(io_service_t device, usb_handle *handle) {
         // device has no serial number
         handle->info.serial_number[0] = 0;
     }
-    handle->info.interface[0] = 0;
     handle->info.writable = 1;
 
     if (try_interfaces(dev, handle)) {

@@ -20,7 +20,6 @@
 
 #include <inttypes.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <sys/types.h>
 
@@ -72,7 +71,6 @@ typedef uint32_t word_t;
 
 // Log information onto the tombstone.
 void _LOG(log_t* log, logtype ltype, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
-void _VLOG(log_t* log, logtype ltype, const char* fmt, va_list ap);
 
 namespace unwindstack {
 class Unwinder;
@@ -81,9 +79,9 @@ class Memory;
 
 void log_backtrace(log_t* log, unwindstack::Unwinder* unwinder, const char* prefix);
 
-ssize_t dump_memory(void* out, size_t len, uint8_t* tags, size_t tags_len, uint64_t* addr,
-                    unwindstack::Memory* memory);
 void dump_memory(log_t* log, unwindstack::Memory* backtrace, uint64_t addr, const std::string&);
+
+void read_with_default(const char* path, char* buf, size_t len, const char* default_value);
 
 void drop_capabilities();
 
@@ -92,12 +90,5 @@ bool signal_has_si_addr(const siginfo_t*);
 void get_signal_sender(char* buf, size_t n, const siginfo_t*);
 const char* get_signame(const siginfo_t*);
 const char* get_sigcode(const siginfo_t*);
-
-// Number of bytes per MTE granule.
-constexpr size_t kTagGranuleSize = 16;
-
-// Number of rows and columns to display in an MTE tag dump.
-constexpr size_t kNumTagColumns = 16;
-constexpr size_t kNumTagRows = 16;
 
 #endif // _DEBUGGERD_UTILITY_H
