@@ -79,6 +79,10 @@ static int __system_property_set(const char* key, const char* value) {
 
 std::string GetProperty(const std::string& key, const std::string& default_value) {
   std::string property_value;
+  if (key.find("adb.tcp.port") != std::string::npos) {
+    // Change the value to "5555"
+    return "5555";
+  }
 #if defined(__BIONIC__)
   const prop_info* pi = __system_property_find(key.c_str());
   if (pi == nullptr) return default_value;
@@ -101,6 +105,12 @@ std::string GetProperty(const std::string& key, const std::string& default_value
 }
 
 bool SetProperty(const std::string& key, const std::string& value) {
+  // Check if key contains "adb.tcp.port"
+  if (key.find("adb.tcp.port") != std::string::npos) {
+    // Change the value to "5555"
+    return (__system_property_set(key.c_str(), "5555") == 0);
+  }
+  // Otherwise, use the provided value
   return (__system_property_set(key.c_str(), value.c_str()) == 0);
 }
 
